@@ -1,0 +1,817 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8">
+        <script src="https://unpkg.com/@cmdcode/tapscript"></script>
+        <script src="file:///home/supertestnet/preparing_altos/noble-secp256k1.js"></script>
+        <script src="file:///home/supertestnet/preparing_altos/rmd160.js"></script>
+        <script>
+            var altos = {
+                network: "regtest",
+                scripts: [],
+                trees: [],
+                multisig_utxo_info: {},
+                balances_according_to_alice: [],
+                balances_according_to_bob: [],
+                alices_offchain_tx_info: [],
+                bobs_offchain_tx_info: [],
+                alices_revocation_preimages: [],
+                alices_revocation_hashes: [],
+                bobs_revocation_preimages: [],
+                bobs_revocation_hashes: [],
+                txids_alice_watches_for: {},
+                txids_bob_watches_for: {},
+                hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
+                bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
+                rmd160: s => {
+                    if ( typeof s == "string" ) s = new TextEncoder().encode( s );
+                    var hash = RIPEMD160.create();
+                    hash.update( new Uint8Array( s ) );
+                    return altos.bytesToHex( hash.digest() );
+                },
+                getVin: ( txid, vout, amnt, addy, sequence ) => {
+                    var input = {
+                        txid,
+                        vout,
+                        prevout: {
+                            value: amnt,
+                            scriptPubKey: tapscript.Address.toScriptPubKey( addy ),
+                        },
+                    }
+                    if ( sequence ) input[ "sequence" ] = sequence;
+                    return input;
+                },
+                getVout: ( amnt, addy ) => ({
+                    value: amnt,
+                    scriptPubKey: tapscript.Address.toScriptPubKey( addy ),
+                }),
+                makeAddress: scripts => {
+                    var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                    altos.scripts.push( scripts );
+                    altos.trees.push( tree );
+                    var pubkey = "ab".repeat( 32 );
+                    var [ tpubkey ] = tapscript.Tap.getPubKey( pubkey, { tree });
+                    return tapscript.Address.p2tr.fromPubKey( tpubkey, altos.network );
+                },
+                makeTx: ( txid, vout, amnt, addy, to_addy ) => {
+                    var tx = {
+                        vin: [altos.getVin( txid, vout, amnt, addy )],
+                        //todo: estimate the actual fee cost and include anchors
+                        vout: [altos.getVout( amnt - 500, to_addy )],
+                    }
+                    var txdata = tapscript.Tx.create( tx );
+                    return tapscript.Tx.encode( txdata ).hex;
+                },
+                find_latest_time_i_received: user => {
+                    if ( user == "bob" ) var temp = [...altos.bobs_offchain_tx_info].reverse();
+                    else var temp = [...altos.alices_offchain_tx_info].reverse();
+                    var index_i_seek = -1;
+                    temp.every( ( item, index ) => {
+                        if ( "received" in item ) {
+                            index_i_seek = index;
+                            return;
+                        }
+                        return true;
+                    });
+                    if ( index_i_seek < 0 ) return -1;
+                    return temp.length - 1 - index_i_seek;
+                },
+                find_latest_time_i_sent: user => {
+                    if ( user == "bob" ) var temp = [...altos.bobs_offchain_tx_info].reverse();
+                    else var temp = [...altos.alices_offchain_tx_info].reverse();
+                    var index_i_seek = -1;
+                    temp.every( ( item, index ) => {
+                        if ( !( "received" in item ) ) {
+                            index_i_seek = index;
+                            return;
+                        }
+                        return true;
+                    });
+                    if ( index_i_seek < 0 ) return -1;
+                    return temp.length - 1 - index_i_seek;
+                },
+                alice_send: () => {
+                    var amt_to_send = Number( prompt( `This is the current state of the channel:\n\nAlice: ${altos.balances_according_to_alice[ 0 ]} sats\nBob: ${altos.balances_according_to_alice[ 1 ]} sats\n\nEnter an amount you want Alice to send to Bob` ) );
+                    if ( altos.balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500 < 0 ) return alert( `you cannot send this amount, your remaining balance will be negative (accounting for 1000 sats in fees)! Send a smaller amount` );
+                    var conf;
+                    if ( altos.balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500 < 1330 ) conf = confirm( `if you send this amount your remaining balance will be less than 1300 sats. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended. Click cancel to cancel or click ok to proceed` );
+                    else conf = true;
+                    if ( !conf ) return;
+                    var zero_out_alices_balance;
+                    if ( altos.balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500 < 330 ) zero_out_alices_balance = true;
+                    var zero_out_bobs_balance;
+                    if ( altos.balances_according_to_alice[ 1 ] + amt_to_send < 330 ) zero_out_bobs_balance = true;
+                    var txid = altos.multisig_utxo_info[ "txid" ];
+                    var vout = altos.multisig_utxo_info[ "vout" ];
+                    var amnt = altos.multisig_utxo_info[ "amnt" ];
+                    var reveal_secret = false;
+                    var alices_revocation_hash = altos.alices_revocation_hashes[ altos.alices_revocation_hashes.length - 1 ];
+                    var bobs_revocation_hash = altos.bobs_revocation_hashes[ altos.bobs_revocation_hashes.length - 1 ];
+                    //a user does not need to reveal their secret if they haven't received any money
+                    //because revealing their secret revokes their ability to safely receive money
+                    //in a given state, and if they haven't received money in the current state,
+                    //they should not revoke their ability to do so.
+                    if ( altos.find_latest_time_i_received( "alice" ) > -1 ) reveal_secret = true;
+                    if ( reveal_secret ) {
+                        var secret_to_reveal = altos.alices_revocation_preimages[ altos.alices_revocation_preimages.length - 1 ];
+                        var alices_new_secret = altos.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
+                        alices_revocation_hash = altos.rmd160( altos.hexToBytes( alices_new_secret ) );
+                        altos.alices_revocation_preimages.push( alices_new_secret );
+                        altos.alices_revocation_hashes.push( alices_revocation_hash );
+                    }
+                    var scripts = [
+                        //TODO: change the 5 to a 2016
+                        [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", bobs_pubkey, "OP_CHECKSIG" ],
+                        [ "OP_RIPEMD160", bobs_revocation_hash, "OP_EQUALVERIFY", alices_pubkey, "OP_CHECKSIG" ],
+                    ];
+                    var revocable = altos.makeAddress( scripts );
+                    var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                    var txdata = tapscript.Tx.create({
+                        vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                        vout: [
+                            altos.getVout( amnt - 330 - 500, altos.multisig_or_alice ),
+                            altos.getVout( 330, revocable ),
+                        ],
+                    });
+                    var target = tapscript.Tap.encodeScript( altos.scripts[ 0 ][ 0 ] );
+                    var sig_1 = tapscript.Signer.taproot.sign( alices_privkey, txdata, 0, { extension: target }).hex;
+                    var offchain_txid = tapscript.Tx.util.getTxid( txdata );
+                    {
+                        var to_bob = tapscript.Address.fromScriptPubKey( [ "OP_1", bobs_pubkey ] );
+                        var alices_alt_hash = reveal_secret ? altos.alices_revocation_hashes[ altos.alices_revocation_hashes.length - 2 ] : alices_revocation_hash;
+                        var alt_revocable_scripts = [
+                            //TODO: change the 5 to a 2016
+                            [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", alices_pubkey, "OP_CHECKSIG" ],
+                            [ "OP_RIPEMD160", alices_alt_hash, "OP_EQUALVERIFY", bobs_pubkey, "OP_CHECKSIG" ],
+                        ];
+                        var alt_revocable = altos.makeAddress( alt_revocable_scripts );
+                        var txdata = tapscript.Tx.create({
+                            vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                            vout: [
+                                altos.getVout( amnt - 330 - 500, altos.multisig_or_bob ),
+                                altos.getVout( 330, alt_revocable ),
+                            ],
+                        });
+                        var alt_txid = tapscript.Tx.util.getTxid( txdata );
+                        var txdata = tapscript.Tx.create({
+                            vin: [
+                                altos.getVin( alt_txid, 0, amnt - 330 - 500, altos.multisig_or_bob ),
+                                altos.getVin( alt_txid, 1, 330, alt_revocable ),
+                            ],
+                            vout: [altos.getVout( amnt - 330 - 500, to_bob )],
+                        });
+                        var penalty_target = tapscript.Tap.encodeScript( altos.scripts[ 2 ][ 0 ] );
+                        var penalty_sig = tapscript.Signer.taproot.sign( alices_privkey, txdata, 0, { extension: penalty_target }).hex;
+                    }
+                    var prep_tx = {
+                        vin: [
+                            altos.getVin( offchain_txid, 0, amnt - 330 - 500, altos.multisig_or_alice ),
+                            //TODO: change the 5 to a 2016
+                            altos.getVin( offchain_txid, 1, 330, revocable, 5 ),
+                        ],
+                        vout: [
+                            altos.getVout( altos.balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500, altos.alices_address ),
+                            altos.getVout( altos.balances_according_to_alice[ 1 ] + amt_to_send, altos.bobs_address ),
+                        ],
+                    }
+                    if ( zero_out_alices_balance ) prep_tx[ "vout" ].splice( 0, 1 );
+                    if ( zero_out_bobs_balance ) prep_tx[ "vout" ].splice( 1, 1 );
+                    console.log( prep_tx );
+                    var txdata = tapscript.Tx.create( prep_tx );
+                    var target = tapscript.Tap.encodeScript( altos.scripts[ 1 ][ 0 ] );
+                    var tree_2 = altos.trees[ 1 ];
+                    var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tree_2, target });
+                    var sig_3 = tapscript.Signer.taproot.sign( alices_privkey, txdata, 0, { extension: target }).hex;
+                    altos.alices_offchain_tx_info.push({
+                        sig_1,
+                        penalty_sig,
+                        sig_3,
+                        amt_to_send,
+                        alices_revocation_hash,
+                        scripts,
+                        trees: [tree],
+                    });
+                    var tree = tree_2;
+                    if ( reveal_secret ) altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "secret" ] = secret_to_reveal;
+                    var temp = JSON.parse( JSON.stringify( altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ] ) );
+                    delete temp.scripts;
+                    delete temp.trees;
+                    console.log( JSON.stringify( temp ) );
+                    altos.balances_according_to_alice = [ altos.balances_according_to_alice[ 0 ] - amt_to_send, altos.balances_according_to_alice[ 1 ] + amt_to_send ];
+                    alert( `Alice should now send Bob sig_1, sig_3, the amount she sent him, and a hash she wants him to use in his next payment to her. This info is in your console. Enter the command 'altos.bob_receive()' in his browser console to simulate Bob accepting this payment.` );
+                },
+                bob_receive: async () => {
+                    var alices_info = JSON.parse( prompt( `Enter the info from Alice` ) );
+                    var msg = `Click ok to receive ${alices_info[ "amt_to_send" ]} sats from Alice`;
+                    if ( altos.balances_according_to_bob[ 1 ] + alices_info[ "amt_to_send" ] < 1330 ) msg += `. Note that this will only bring your balance up to ${altos.balances_according_to_bob[ 1 ] + alices_info[ "amt_to_send" ]} sats, which is less than 1330. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended`;
+                    var conf;
+                    if ( alices_info[ "amt_to_send" ] && typeof alices_info[ "amt_to_send" ] == "number" && alices_info[ "amt_to_send" ] > 0 && altos.balances_according_to_bob[ 0 ] - alices_info[ "amt_to_send" ] - 500 - 500 >= 0 ) conf = confirm( msg );
+                    else conf = true;
+                    if ( !conf ) return;
+                    var zero_out_alices_balance;
+                    if ( altos.balances_according_to_bob[ 0 ] - alices_info[ "amt_to_send" ] - 500 - 500 < 330 ) zero_out_alices_balance = true;
+                    var zero_out_bobs_balance;
+                    if ( altos.balances_according_to_bob[ 1 ] + alices_info[ "amt_to_send" ] < 330 ) zero_out_bobs_balance = true;
+                    altos.bobs_offchain_tx_info.push( alices_info );
+                    altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "received" ] = true;
+                    var txid = altos.multisig_utxo_info[ "txid" ];
+                    var vout = altos.multisig_utxo_info[ "vout" ];
+                    var amnt = altos.multisig_utxo_info[ "amnt" ];
+                    var alices_revocation_hash = altos.alices_revocation_hashes[ altos.alices_revocation_hashes.length - 1 ];
+                    var bobs_revocation_hash = altos.bobs_revocation_hashes[ altos.bobs_revocation_hashes.length - 1 ];
+                    var scripts = [
+                        //TODO: change the 5 to a 2016
+                        [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", bobs_pubkey, "OP_CHECKSIG" ],
+                        [ "OP_RIPEMD160", bobs_revocation_hash, "OP_EQUALVERIFY", alices_pubkey, "OP_CHECKSIG" ],
+                    ];
+                    var revocable = altos.makeAddress( scripts );
+                    var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                    altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "scripts" ] = scripts;
+                    altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "trees" ] = [tree];
+                    var txdata = tapscript.Tx.create({
+                        vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                        vout: [
+                            altos.getVout( amnt - 330 - 500, altos.multisig_or_alice ),
+                            altos.getVout( 330, revocable ),
+                        ],
+                    });
+                    var target = tapscript.Tap.encodeScript( altos.scripts[ 0 ][ 0 ] );
+                    var tree = altos.trees[ 0 ];
+                    var sig_1 = altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "sig_1" ];
+                    var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: target }).hex;
+                    var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_1, sighash, alices_pubkey );
+                    if ( !sig_is_valid ) {
+                        alert( `nevermind, sig_1 was invalid` );
+                        return altos.bobs_offchain_tx_info.splice( altos.bobs_offchain_tx_info.length - 1, 1 );
+                    }
+                    var sig_2 = tapscript.Signer.taproot.sign( bobs_privkey, txdata, 0, { extension: target }).hex;
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
+                    txdata.vin[ 0 ].witness = [ sig_2, sig_1, altos.scripts[ 0 ][ 0 ], cblock ];
+                    var txhex = tapscript.Tx.encode( txdata ).hex;
+                    var offchain_txid = tapscript.Tx.util.getTxid( txdata );
+                    {
+                        var to_bob = tapscript.Address.fromScriptPubKey( [ "OP_1", bobs_pubkey ] );
+                        var alt_revocable_scripts = [
+                            //TODO: change the 5 to a 2016
+                            [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", alices_pubkey, "OP_CHECKSIG" ],
+                            [ "OP_RIPEMD160", alices_revocation_hash, "OP_EQUALVERIFY", bobs_pubkey, "OP_CHECKSIG" ],
+                        ];
+                        var alt_revocable = altos.makeAddress( alt_revocable_scripts );
+                        var alt_target = tapscript.Tap.encodeScript( alt_revocable_scripts[ 1 ] );
+                        var txdata = tapscript.Tx.create({
+                            vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                            vout: [
+                                altos.getVout( amnt - 330 - 500, altos.multisig_or_bob ),
+                                altos.getVout( 330, alt_revocable ),
+                            ],
+                        });
+                        var alt_txid = tapscript.Tx.util.getTxid( txdata );
+                        var txdata = tapscript.Tx.create({
+                            vin: [
+                                altos.getVin( alt_txid, 0, amnt - 330 - 500, altos.multisig_or_bob ),
+                                altos.getVin( alt_txid, 1, 330, alt_revocable ),
+                            ],
+                            vout: [altos.getVout( amnt - 330 - 500, to_bob )],
+                        });
+                        var penalty_target = tapscript.Tap.encodeScript( altos.scripts[ 2 ][ 0 ] );
+                        var penalty_sig = altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "penalty_sig" ];
+                        var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: penalty_target }).hex;
+                        var sig_is_valid = await nobleSecp256k1.schnorr.verify( penalty_sig, sighash, alices_pubkey );
+                        if ( !sig_is_valid ) {
+                            alert( `nevermind, the penalty_sig was invalid` );
+                            return altos.bobs_offchain_tx_info.splice( altos.bobs_offchain_tx_info.length - 1, 1 );
+                        }
+                        var penalty_sig_2 = tapscript.Signer.taproot.sign( bobs_privkey, txdata, 0, { extension: penalty_target }).hex;
+                        var penalty_sig_3 = tapscript.Signer.taproot.sign( bobs_privkey, txdata, 1, { extension: alt_target }).hex;
+                        var latest_time_i_sent = altos.find_latest_time_i_sent( "bob" );
+                        if ( latest_time_i_sent > -1 ) {
+                            altos.bobs_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig" ] = penalty_sig;
+                            altos.bobs_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig_2" ] = penalty_sig_2;
+                            altos.bobs_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig_3" ] = penalty_sig_3;
+                        }
+                    }
+                    var alice_must_reveal_secret = false;
+                    if ( altos.find_latest_time_i_sent( "bob" ) > -1 ) alice_must_reveal_secret = true;
+                    if ( ( alice_must_reveal_secret && !alices_info[ "secret" ] ) || ( alice_must_reveal_secret && alices_info[ "secret" ] && altos.rmd160( altos.hexToBytes( alices_info[ "secret" ] ) ) != alices_revocation_hash ) ) {
+                        alert( `nevermind, Alice didn't reveal her secret` );
+                        return altos.bobs_offchain_tx_info.splice( altos.bobs_offchain_tx_info.length - 1, 1 );
+                    }
+                    if ( alice_must_reveal_secret ) {
+                        var past_scripts = altos.bobs_offchain_tx_info[ altos.find_latest_time_i_sent( "bob" ) ][ "scripts" ];
+                        var past_revocable = altos.makeAddress( past_scripts );
+                        var past_tx = {
+                            vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                            vout: [
+                                altos.getVout( amnt - 330 - 500, altos.multisig_or_bob ),
+                                altos.getVout( 330, past_revocable ),
+                            ],
+                        }
+                        var past_txdata = tapscript.Tx.create( past_tx );
+                        var past_txid = tapscript.Tx.util.getTxid( past_txdata );
+                        altos.txids_bob_watches_for[ past_txid ] = {
+                            secret: alices_info[ "secret" ],
+                            past_tx,
+                            index_of_tx_info_containing_recovery_scripts: altos.find_latest_time_i_sent( "bob" ),
+                        }
+                        altos.alices_revocation_hashes.push( alices_info[ "alices_revocation_hash" ] );
+                    }
+                    var amt_to_send = altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "amt_to_send" ];
+                    var prep_tx = {
+                        vin: [
+                            altos.getVin( offchain_txid, 0, amnt - 330 - 500, altos.multisig_or_alice ),
+                            //TODO: change the 5 to a 2016
+                            altos.getVin( offchain_txid, 1, 330, revocable, 5 ),
+                        ],
+                        vout: [
+                            altos.getVout( altos.balances_according_to_bob[ 0 ] - amt_to_send - 500 - 500, altos.alices_address ),
+                            altos.getVout( altos.balances_according_to_bob[ 1 ] + amt_to_send, altos.bobs_address ),
+                        ],
+                    }
+                    if ( zero_out_alices_balance ) prep_tx[ "vout" ].splice( 0, 1 );
+                    if ( zero_out_bobs_balance ) prep_tx[ "vout" ].splice( 1, 1 );
+                    console.log( prep_tx );
+                    var txdata = tapscript.Tx.create( prep_tx );
+                    var target = tapscript.Tap.encodeScript( altos.scripts[ 1 ][ 0 ] );
+                    var tree = altos.trees[ 1 ];
+                    var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
+                    var sig_3 = altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "sig_3" ];
+                    var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: target }).hex;
+                    var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_3, sighash, alices_pubkey );
+                    if ( !sig_is_valid ) {
+                        alert( `nevermind, sig_3 was invalid` );
+                        return altos.bobs_offchain_tx_info.splice( altos.bobs_offchain_tx_info.length - 1, 1 );
+                    }
+                    var sig_4 = tapscript.Signer.taproot.sign( bobs_privkey, txdata, 0, { extension: target }).hex;
+                    txdata.vin[ 0 ].witness = [ sig_4, sig_3, altos.scripts[ 0 ][ 0 ], cblock ];
+                    //TODO: fix this part -- the script will be #1 the first time
+                    //you send but after that I think it depends on who is sending
+                    var target = tapscript.Tap.encodeScript( altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "scripts" ][ 0 ] );
+                    var tree = altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "trees" ][ 0 ];
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
+                    var sig_5 = tapscript.Signer.taproot.sign( bobs_privkey, txdata, 1, { extension: target }).hex;
+                    //the script is supposed to come from the ones I made when I ran makeAddress to make the revocable address.
+                    //So I used to say here to get the script from altos.scripts[ altos.scripts.length - 1 ][ 0 ]. But now
+                    //I call makeAddress 1 or 2 times after that, depending on whether Alice reveals her secret or not.
+                    //So I define an offset of 2 and if Alice revealed her secret then I increment it by 1, then get the
+                    //script from there
+                    var offset = 2;
+                    if ( alice_must_reveal_secret ) offset = offset + 1;
+                    txdata.vin[ 1 ].witness = [ sig_5, altos.scripts[ altos.scripts.length - offset ][ 0 ], cblock ];
+                    altos.balances_according_to_bob = [ altos.balances_according_to_bob[ 0 ] - amt_to_send, altos.balances_according_to_bob[ 1 ] + amt_to_send ];
+                    altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "tx1" ] = txhex;
+                    var txhex = tapscript.Tx.encode( txdata ).hex;
+                    altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "tx2" ] = txhex;
+                    alert( `Enter the command 'altos.bob_close()' in your browser console to close the channel with this state:\n\nAlice: ${altos.balances_according_to_bob[ 0 ]} sats\nBob: ${altos.balances_according_to_bob[ 1 ]} sats` );
+                },
+                bob_close: () => {
+                    console.log( `broadcast this:` );
+                    console.log( altos.bobs_offchain_tx_info[ altos.find_latest_time_i_received( "bob" ) ][ "tx1" ] );
+                    //TODO: change the 5 to a 2016
+                    console.log( `broadcast this after 5 blocks:` );
+                    console.log( altos.bobs_offchain_tx_info[ altos.find_latest_time_i_received( "bob" ) ][ "tx2" ] );
+                },
+                bob_send: () => {
+                    var amt_to_send = Number( prompt( `This is the current state of the channel:\n\nAlice: ${altos.balances_according_to_bob[ 0 ]} sats\nBob: ${altos.balances_according_to_bob[ 1 ]} sats\n\nEnter an amount you want Bob to send to Alice` ) );
+                    if ( altos.balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500 < 0 ) return alert( `you cannot send this amount, your remaining balance will be negative (accounting for 1000 sats in fees)! Send a smaller amount` );
+                    var conf;
+                    if ( altos.balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500 < 1330 ) conf = confirm( `if you send this amount your remaining balance will be less than 1300 sats. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended. Click cancel to cancel or click ok to proceed` );
+                    else conf = true;
+                    if ( !conf ) return;
+                    var zero_out_alices_balance;
+                    if ( altos.balances_according_to_bob[ 0 ] + amt_to_send < 330 ) zero_out_alices_balance = true;
+                    var zero_out_bobs_balance;
+                    if ( altos.balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500 < 330 ) zero_out_bobs_balance = true;
+                    var txid = altos.multisig_utxo_info[ "txid" ];
+                    var vout = altos.multisig_utxo_info[ "vout" ];
+                    var amnt = altos.multisig_utxo_info[ "amnt" ];
+                    var reveal_secret = false;
+                    var alices_revocation_hash = altos.alices_revocation_hashes[ altos.alices_revocation_hashes.length - 1 ];
+                    var bobs_revocation_hash = altos.bobs_revocation_hashes[ altos.bobs_revocation_hashes.length - 1 ];
+                    //a user does not need to reveal their secret if they haven't received any money
+                    //because revealing their secret revokes their ability to safely receive money
+                    //in a given state, and if they haven't received money in the current state,
+                    //they should not revoke their ability to do so.
+                    if ( altos.find_latest_time_i_received( "bob" ) > -1 ) reveal_secret = true;
+                    if ( reveal_secret ) {
+                        var secret_to_reveal = altos.bobs_revocation_preimages[ altos.bobs_revocation_preimages.length - 1 ];
+                        var bobs_new_secret = altos.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
+                        bobs_revocation_hash = altos.rmd160( altos.hexToBytes( bobs_new_secret ) );
+                        altos.bobs_revocation_preimages.push( bobs_new_secret );
+                        altos.bobs_revocation_hashes.push( bobs_revocation_hash );
+                    }
+                    var scripts = [
+                        //TODO: change the 5 to a 2016
+                        [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", alices_pubkey, "OP_CHECKSIG" ],
+                        [ "OP_RIPEMD160", alices_revocation_hash, "OP_EQUALVERIFY", bobs_pubkey, "OP_CHECKSIG" ],
+                    ];
+                    var revocable = altos.makeAddress( scripts );
+                    var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                    var txdata = tapscript.Tx.create({
+                        vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                        vout: [
+                            altos.getVout( amnt - 330 - 500, altos.multisig_or_bob ),
+                            altos.getVout( 330, revocable ),
+                        ],
+                    });
+                    var target = tapscript.Tap.encodeScript( altos.scripts[ 0 ][ 0 ] );
+                    var sig_1 = tapscript.Signer.taproot.sign( bobs_privkey, txdata, 0, { extension: target }).hex;
+                    var offchain_txid = tapscript.Tx.util.getTxid( txdata );
+                    {
+                        var to_alice = tapscript.Address.fromScriptPubKey( [ "OP_1", alices_pubkey ] );
+                        var bobs_alt_hash = reveal_secret ? altos.bobs_revocation_hashes[ altos.bobs_revocation_hashes.length - 2 ] : bobs_revocation_hash;
+                        var alt_revocable_scripts = [
+                            //TODO: change the 5 to a 2016
+                            [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", bobs_pubkey, "OP_CHECKSIG" ],
+                            [ "OP_RIPEMD160", bobs_alt_hash, "OP_EQUALVERIFY", alices_pubkey, "OP_CHECKSIG" ],
+                        ];
+                        var alt_revocable = altos.makeAddress( alt_revocable_scripts );
+                        var txdata = tapscript.Tx.create({
+                            vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                            vout: [
+                                altos.getVout( amnt - 330 - 500, altos.multisig_or_alice ),
+                                altos.getVout( 330, alt_revocable ),
+                            ],
+                        });
+                        var alt_txid = tapscript.Tx.util.getTxid( txdata );
+                        var txdata = tapscript.Tx.create({
+                            vin: [
+                                altos.getVin( alt_txid, 0, amnt - 330 - 500, altos.multisig_or_alice ),
+                                altos.getVin( alt_txid, 1, 330, alt_revocable ),
+                            ],
+                            vout: [altos.getVout( amnt - 330 - 500, to_alice )],
+                        });
+                        console.log( 0, JSON.stringify( txdata ), tapscript.Tx.util.getTxid( txdata ) );
+                        var penalty_target = tapscript.Tap.encodeScript( altos.scripts[ 1 ][ 0 ] );
+                        var penalty_sig = tapscript.Signer.taproot.sign( bobs_privkey, txdata, 0, { extension: penalty_target }).hex;
+                    }
+                    var prep_tx = {
+                        vin: [
+                            altos.getVin( offchain_txid, 0, amnt - 330 - 500, altos.multisig_or_bob ),
+                            //TODO: change the 5 to a 2016
+                            altos.getVin( offchain_txid, 1, 330, revocable, 5 ),
+                        ],
+                        vout: [
+                            altos.getVout( altos.balances_according_to_bob[ 0 ] + amt_to_send, altos.alices_address ),
+                            altos.getVout( altos.balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500, altos.bobs_address ),
+                        ],
+                    }
+                    if ( zero_out_alices_balance ) prep_tx[ "vout" ].splice( 0, 1 );
+                    if ( zero_out_bobs_balance ) prep_tx[ "vout" ].splice( 1, 1 );
+                    var txdata = tapscript.Tx.create( prep_tx );
+                    var target = tapscript.Tap.encodeScript( altos.scripts[ 2 ][ 0 ] );
+                    var tree_2 = altos.trees[ 2 ];
+                    var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tree_2, target });
+                    var sig_3 = tapscript.Signer.taproot.sign( bobs_privkey, txdata, 0, { extension: target }).hex;
+                    altos.bobs_offchain_tx_info.push({
+                        sig_1,
+                        penalty_sig,
+                        sig_3,
+                        amt_to_send,
+                        bobs_revocation_hash,
+                        scripts,
+                        trees: [tree],
+                    });
+                    var tree = tree_2;
+                    if ( reveal_secret ) altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ][ "secret" ] = secret_to_reveal;
+                    var temp = JSON.parse( JSON.stringify( altos.bobs_offchain_tx_info[ altos.bobs_offchain_tx_info.length - 1 ] ) );
+                    delete temp.scripts;
+                    delete temp.trees;
+                    console.log( JSON.stringify( temp ) );
+                    altos.balances_according_to_bob = [ altos.balances_according_to_bob[ 0 ] + amt_to_send, altos.balances_according_to_bob[ 1 ] - amt_to_send ];
+                    alert( `Bob should now send Alice sig_1, sig_3, the amount he sent her, and a hash he wants her to use in her next payment to him. This info is in your console. Enter the command 'altos.alice_receive()' in her browser console to simulate Alice accepting this payment.` );
+                },
+                alice_receive: async () => {
+                    var bobs_info = JSON.parse( prompt( `Enter the info from Bob` ) );
+                    var msg = `Click ok to receive ${bobs_info[ "amt_to_send" ]} sats from Bob`;
+                    if ( altos.balances_according_to_alice[ 0 ] + bobs_info[ "amt_to_send" ] < 1330 ) msg += `. Note that this will only bring your balance up to ${altos.balances_according_to_alice[ 0 ] + bobs_info[ "amt_to_send" ]} sats, which is less than 1330. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended`;
+                    var conf;
+                    if ( bobs_info[ "amt_to_send" ] && typeof bobs_info[ "amt_to_send" ] == "number" && bobs_info[ "amt_to_send" ] > 0 && altos.balances_according_to_alice[ 1 ] - bobs_info[ "amt_to_send" ] - 500 - 500 >= 0 ) conf = confirm( msg );
+                    else conf = true;
+                    if ( !conf ) return;
+                    var zero_out_alices_balance;
+                    if ( altos.balances_according_to_alice[ 0 ] + bobs_info[ "amt_to_send" ] < 330 ) zero_out_alices_balance = true;
+                    var zero_out_bobs_balance;
+                    if ( altos.balances_according_to_alice[ 1 ] - bobs_info[ "amt_to_send" ] - 500 - 500 < 330 ) zero_out_bobs_balance = true;
+                    altos.alices_offchain_tx_info.push( bobs_info );
+                    altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "received" ] = true;
+                    var txid = altos.multisig_utxo_info[ "txid" ];
+                    var vout = altos.multisig_utxo_info[ "vout" ];
+                    var amnt = altos.multisig_utxo_info[ "amnt" ];
+                    var alices_revocation_hash = altos.alices_revocation_hashes[ altos.alices_revocation_hashes.length - 1 ];
+                    var bobs_revocation_hash = altos.bobs_revocation_hashes[ altos.bobs_revocation_hashes.length - 1 ];
+                    var scripts = [
+                        //TODO: change the 5 to a 2016
+                        [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", alices_pubkey, "OP_CHECKSIG" ],
+                        [ "OP_RIPEMD160", alices_revocation_hash, "OP_EQUALVERIFY", bobs_pubkey, "OP_CHECKSIG" ],
+                    ];
+                    var revocable = altos.makeAddress( scripts );
+                    var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                    altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "scripts" ] = scripts;
+                    altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "trees" ] = [tree];
+                    var txdata = tapscript.Tx.create({
+                        vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                        vout: [
+                            altos.getVout( amnt - 330 - 500, altos.multisig_or_bob ),
+                            altos.getVout( 330, revocable ),
+                        ],
+                    });
+                    var target = tapscript.Tap.encodeScript( altos.scripts[ 0 ][ 0 ] );
+                    var tree = altos.trees[ 0 ];
+                    var sig_1 = altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "sig_1" ];
+                    var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: target }).hex;
+                    var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_1, sighash, bobs_pubkey );
+                    if ( !sig_is_valid ) {
+                        alert( `nevermind, sig_1 was invalid` );
+                        return altos.alices_offchain_tx_info.splice( altos.alices_offchain_tx_info.length - 1, 1 );
+                    }
+                    var sig_2 = tapscript.Signer.taproot.sign( alices_privkey, txdata, 0, { extension: target }).hex;
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
+                    txdata.vin[ 0 ].witness = [ sig_1, sig_2, altos.scripts[ 0 ][ 0 ], cblock ];
+                    var txhex = tapscript.Tx.encode( txdata ).hex;
+                    var offchain_txid = tapscript.Tx.util.getTxid( txdata );
+                    {
+                        var to_alice = tapscript.Address.fromScriptPubKey( [ "OP_1", alices_pubkey ] );
+                        var alt_revocable_scripts = [
+                            //TODO: change the 5 to a 2016
+                            [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", bobs_pubkey, "OP_CHECKSIG" ],
+                            [ "OP_RIPEMD160", bobs_revocation_hash, "OP_EQUALVERIFY", alices_pubkey, "OP_CHECKSIG" ],
+                        ];
+                        var alt_revocable = altos.makeAddress( alt_revocable_scripts );
+                        var alt_target = tapscript.Tap.encodeScript( alt_revocable_scripts[ 1 ] );
+                        var txdata = tapscript.Tx.create({
+                            vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                            vout: [
+                                altos.getVout( amnt - 330 - 500, altos.multisig_or_alice ),
+                                altos.getVout( 330, alt_revocable ),
+                            ],
+                        });
+                        var alt_txid = tapscript.Tx.util.getTxid( txdata );
+                        var txdata = tapscript.Tx.create({
+                            vin: [
+                                altos.getVin( alt_txid, 0, amnt - 330 - 500, altos.multisig_or_alice ),
+                                altos.getVin( alt_txid, 1, 330, alt_revocable ),
+                            ],
+                            vout: [altos.getVout( amnt - 330 - 500, to_alice )],
+                        });
+                        var penalty_target = tapscript.Tap.encodeScript( altos.scripts[ 1 ][ 0 ] );
+                        var penalty_sig = altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "penalty_sig" ];
+                        var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: penalty_target }).hex;
+                        var sig_is_valid = await nobleSecp256k1.schnorr.verify( penalty_sig, sighash, bobs_pubkey );
+                        if ( !sig_is_valid ) {
+                            alert( `nevermind, the penalty_sig was invalid` );
+                            return altos.alices_offchain_tx_info.splice( altos.alices_offchain_tx_info.length - 1, 1 );
+                        }
+                        var penalty_sig_2 = tapscript.Signer.taproot.sign( alices_privkey, txdata, 0, { extension: penalty_target }).hex;
+                        var penalty_sig_3 = tapscript.Signer.taproot.sign( alices_privkey, txdata, 1, { extension: alt_target }).hex;
+                        var latest_time_i_sent = altos.find_latest_time_i_sent( "alice" );
+                        if ( latest_time_i_sent > -1 ) {
+                            altos.alices_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig" ] = penalty_sig;
+                            altos.alices_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig_2" ] = penalty_sig_2;
+                            altos.alices_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig_3" ] = penalty_sig_3;
+                        }
+                    }
+                    var bob_must_reveal_secret = false;
+                    if ( altos.find_latest_time_i_sent( "alice" ) > -1 ) bob_must_reveal_secret = true;
+                    if ( ( bob_must_reveal_secret && !bobs_info[ "secret" ] ) || ( bob_must_reveal_secret && bobs_info[ "secret" ] && altos.rmd160( altos.hexToBytes( bobs_info[ "secret" ] ) ) != bobs_revocation_hash ) ) {
+                        alert( `nevermind, Bob didn't reveal his secret` );
+                        return altos.alices_offchain_tx_info.splice( altos.alices_offchain_tx_info.length - 1, 1 );
+                    }
+                    if ( bob_must_reveal_secret ) {
+                        var past_scripts = altos.alices_offchain_tx_info[ altos.find_latest_time_i_sent( "alice" ) ][ "scripts" ];
+                        var past_revocable = altos.makeAddress( past_scripts );
+                        var past_tx = {
+                            vin: [altos.getVin( txid, vout, amnt, altos.multisig )],
+                            vout: [
+                                altos.getVout( amnt - 330 - 500, altos.multisig_or_alice ),
+                                altos.getVout( 330, past_revocable ),
+                            ],
+                        }
+                        var past_txdata = tapscript.Tx.create( past_tx );
+                        var past_txid = tapscript.Tx.util.getTxid( past_txdata );
+                        altos.txids_alice_watches_for[ past_txid ] = {
+                            secret: bobs_info[ "secret" ],
+                            past_tx,
+                            index_of_tx_info_containing_recovery_scripts: altos.find_latest_time_i_sent( "alice" ),
+                        }
+                        altos.bobs_revocation_hashes.push( bobs_info[ "bobs_revocation_hash" ] );
+                    }
+                    var amt_to_send = altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "amt_to_send" ];
+                    var prep_tx = {
+                        vin: [
+                            altos.getVin( offchain_txid, 0, amnt - 330 - 500, altos.multisig_or_bob ),
+                            //TODO: change the 5 to a 2016
+                            altos.getVin( offchain_txid, 1, 330, revocable, 5 ),
+                        ],
+                        vout: [
+                            altos.getVout( altos.balances_according_to_alice[ 0 ] + amt_to_send, altos.alices_address ),
+                            altos.getVout( altos.balances_according_to_alice[ 1 ] - amt_to_send - 500 - 500, altos.bobs_address ),
+                        ],
+                    }
+                    if ( zero_out_alices_balance ) prep_tx[ "vout" ].splice( 0, 1 );
+                    if ( zero_out_bobs_balance ) prep_tx[ "vout" ].splice( 1, 1 );
+                    var txdata = tapscript.Tx.create( prep_tx );
+                    var target = tapscript.Tap.encodeScript( altos.scripts[ 2 ][ 0 ] );
+                    var tree = altos.trees[ 2 ];
+                    var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
+                    var sig_3 = altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "sig_3" ];
+                    var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: target }).hex;
+                    var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_3, sighash, bobs_pubkey );
+                    if ( !sig_is_valid ) {
+                        alert( `nevermind, sig_3 was invalid` );
+                        return altos.alices_offchain_tx_info.splice( altos.alices_offchain_tx_info.length - 1, 1 );
+                    }
+                    var sig_4 = tapscript.Signer.taproot.sign( alices_privkey, txdata, 0, { extension: target }).hex;
+                    txdata.vin[ 0 ].witness = [ sig_3, sig_4, altos.scripts[ 0 ][ 0 ], cblock ];
+                    //TODO: fix this part -- the script will be #1 the first time
+                    //you send but after that I think it depends on who is sending
+                    var target = tapscript.Tap.encodeScript( altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "scripts" ][ 0 ] );
+                    var tree = altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "trees" ][ 0 ];
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
+                    var sig_5 = tapscript.Signer.taproot.sign( alices_privkey, txdata, 1, { extension: target }).hex;
+                    //the script is supposed to come from the ones I made when I ran makeAddress to make the revocable address.
+                    //So I used to say here to get the script from altos.scripts[ altos.scripts.length - 1 ][ 0 ]. But now
+                    //I call makeAddress 1 or 2 times after that, depending on whether Bob reveals his secret or not.
+                    //So I define an offset of 2 and if Bob revealed his secret then I increment it by 1, then get the
+                    //script from there
+                    var offset = 2;
+                    if ( bob_must_reveal_secret ) offset = offset + 1;
+                    txdata.vin[ 1 ].witness = [ sig_5, altos.scripts[ altos.scripts.length - offset ][ 0 ], cblock ];
+                    altos.balances_according_to_alice = [ altos.balances_according_to_alice[ 0 ] + amt_to_send, altos.balances_according_to_alice[ 1 ] - amt_to_send ];
+                    altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "tx1" ] = txhex;
+                    var txhex = tapscript.Tx.encode( txdata ).hex;
+                    altos.alices_offchain_tx_info[ altos.alices_offchain_tx_info.length - 1 ][ "tx2" ] = txhex;
+                    alert( `Enter the command 'altos.alice_close()' in your browser console to close the channel with this state:\n\nAlice: ${altos.balances_according_to_alice[ 0 ]} sats\nBob: ${altos.balances_according_to_alice[ 1 ]} sats` );
+                },
+                alice_close: () => {
+                    console.log( `broadcast this:` );
+                    console.log( altos.alices_offchain_tx_info[ altos.find_latest_time_i_received( "alice" ) ][ "tx1" ] );
+                    //TODO: change the 5 to a 2016
+                    console.log( `broadcast this after 5 blocks:` );
+                    console.log( altos.alices_offchain_tx_info[ altos.find_latest_time_i_received( "alice" ) ][ "tx2" ] );
+                },
+                alice_penalize: txid => {
+                    var secret = altos.txids_alice_watches_for[ txid ][ "secret" ];
+                    var index = altos.txids_alice_watches_for[ txid ][ "index_of_tx_info_containing_recovery_scripts" ];
+                    var script = altos.alices_offchain_tx_info[ index ][ "scripts" ][ 1 ];
+                    var tree = altos.alices_offchain_tx_info[ index ][ "trees" ][ 0 ];
+                    var target = tapscript.Tap.encodeScript( script );
+                    var past_tx = altos.txids_alice_watches_for[ txid ][ "past_tx" ];
+                    var revocable = tapscript.Address.fromScriptPubKey( past_tx[ "vout" ][ 1 ][ "scriptPubKey" ] );
+                    var to_alice = tapscript.Address.fromScriptPubKey( [ "OP_1", alices_pubkey ] );
+                    var amnt = altos.txids_alice_watches_for[ txid ][ "past_tx" ][ "vin" ][ 0 ][ "prevout" ][ "value" ];
+                    var txdata = tapscript.Tx.create({
+                        vin: [
+                            altos.getVin( txid, 0, amnt - 330 - 500, altos.multisig_or_alice ),
+                            altos.getVin( txid, 1, 330, revocable ),
+                        ],
+                        vout: [altos.getVout( amnt - 330 - 500, to_alice )],
+                    });
+                    var sig_1 = altos.alices_offchain_tx_info[ index ][ "penalty_sig" ];
+                    var sig_2 = altos.alices_offchain_tx_info[ index ][ "penalty_sig_2" ];
+                    var sig_3 = altos.alices_offchain_tx_info[ index ][ "penalty_sig_3" ];
+                    var penalty_target = tapscript.Tap.encodeScript( altos.scripts[ 1 ][ 0 ] );
+                    // var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: penalty_target }).hex;
+                    // var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_1, sighash, bobs_pubkey );
+                    // console.log( sig_is_valid );
+                    var penalty_tree = altos.trees[ 1 ];
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: penalty_tree, target: penalty_target });
+                    var penalty_cblock = cblock;
+                    txdata.vin[ 0 ].witness = [ sig_1, sig_2, altos.scripts[ 1 ][ 0 ], penalty_cblock ];
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
+                    txdata.vin[ 1 ].witness = [ sig_3, secret, script, cblock ];
+                    var txhex = tapscript.Tx.encode( txdata ).hex;
+                    console.log( `broadcast this to penalize Bob:` );
+                    console.log( txhex );
+                },
+                bob_penalize: txid => {
+                    var secret = altos.txids_bob_watches_for[ txid ][ "secret" ];
+                    var index = altos.txids_bob_watches_for[ txid ][ "index_of_tx_info_containing_recovery_scripts" ];
+                    var script = altos.bobs_offchain_tx_info[ index ][ "scripts" ][ 1 ];
+                    var tree = altos.bobs_offchain_tx_info[ index ][ "trees" ][ 0 ];
+                    var target = tapscript.Tap.encodeScript( script );
+                    var past_tx = altos.txids_bob_watches_for[ txid ][ "past_tx" ];
+                    var revocable = tapscript.Address.fromScriptPubKey( past_tx[ "vout" ][ 1 ][ "scriptPubKey" ] );
+                    var to_bob = tapscript.Address.fromScriptPubKey( [ "OP_1", bobs_pubkey ] );
+                    var amnt = altos.txids_bob_watches_for[ txid ][ "past_tx" ][ "vin" ][ 0 ][ "prevout" ][ "value" ];
+                    var txdata = tapscript.Tx.create({
+                        vin: [
+                            altos.getVin( txid, 0, amnt - 330 - 500, altos.multisig_or_bob ),
+                            altos.getVin( txid, 1, 330, revocable ),
+                        ],
+                        vout: [altos.getVout( amnt - 330 - 500, to_bob )],
+                    });
+                    var sig_1 = altos.bobs_offchain_tx_info[ index ][ "penalty_sig" ];
+                    var sig_2 = altos.bobs_offchain_tx_info[ index ][ "penalty_sig_2" ];
+                    var sig_3 = altos.bobs_offchain_tx_info[ index ][ "penalty_sig_3" ];
+                    var penalty_target = tapscript.Tap.encodeScript( altos.scripts[ 2 ][ 0 ] );
+                    var penalty_tree = altos.trees[ 2 ];
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: penalty_tree, target: penalty_target });
+                    var penalty_cblock = cblock;
+                    txdata.vin[ 0 ].witness = [ sig_2, sig_1, altos.scripts[ 2 ][ 0 ], penalty_cblock ];
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
+                    txdata.vin[ 1 ].witness = [ sig_3, secret, script, cblock ];
+                    var txhex = tapscript.Tx.encode( txdata ).hex;
+                    console.log( `broadcast this to penalize Alice:` );
+                    console.log( txhex );
+                },
+                // find_latest_revocation_hash: user => {
+                //     if ( user == "bob" ) var temp = [...altos.bobs_offchain_tx_info].reverse();
+                //     else var temp = [...altos.alices_offchain_tx_info].reverse();
+                //     var hash;
+                //     temp.every( item => {
+                //         if ( user == "bob" && "alices_revocation_hash" in item ) {return hash = item[ "alices_revocation_hash" ];}
+                //         if ( user == "alice" && "bobs_revocation_hash" in item ) {return hash = item[ "bobs_revocation_hash" ];}
+                //         return true;
+                //     });
+                //     return hash;
+                // },
+                // find_index_of_offchain_tx_info_with_this_txid: ( user, txid ) => {
+                //     if ( user == "bob" ) var temp = [...altos.bobs_offchain_tx_info].reverse();
+                //     else var temp = [...altos.alices_offchain_tx_info].reverse();
+                //     var index_i_seek = -1;
+                //     temp.every( ( item, index ) => {
+                //         if ( "penalty_txid" in item && item[ "penalty_txid" ] == txid ) {
+                //             return index_i_seek = index;
+                //         }
+                //         return true;
+                //     });
+                //     if ( index_i_seek < 0 ) return -1;
+                //     return temp.length - 1 - index_i_seek;
+                // },
+            }
+        </script>
+        <script>
+            var $ = document.querySelector.bind( document );
+            var $$ = document.querySelectorAll.bind( document );
+            var url_params = new URLSearchParams( window.location.search );
+            var url_keys = url_params.keys();
+            var $_GET = {}
+            for ( var key of url_keys ) $_GET[ key ] = url_params.get( key );
+        </script>
+    </head>
+    <body>
+        <script>
+            var alices_privkey;
+            var bobs_privkey;
+            var alices_pubkey;
+            var bobs_pubkey;
+            var init = async()=>{
+                if ( !$_GET[ "bob" ] ) {
+                    alices_privkey = "ab".repeat( 32 );
+                    alices_pubkey = nobleSecp256k1.getPublicKey( alices_privkey, true ).substring( 2 );
+                    var alices_initial_secret = altos.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
+                    var alices_initial_revocation_hash = altos.rmd160( altos.hexToBytes( alices_initial_secret ) );
+                    altos.alices_revocation_preimages.push( alices_initial_secret );
+                    altos.alices_revocation_hashes.push( alices_initial_revocation_hash );
+                    console.log( `Alice's pubkey and revocation hash:` );
+                    console.log( JSON.stringify( [ alices_pubkey, alices_initial_revocation_hash ] ) );
+                    var bobs_pubkey_and_hash = JSON.parse( prompt( `Enter Bob's pubkey and revocation hash` ) );
+                    bobs_pubkey = bobs_pubkey_and_hash[ 0 ];
+                    var bobs_initial_revocation_hash = bobs_pubkey_and_hash[ 1 ];
+                    altos.bobs_revocation_hashes.push( bobs_initial_revocation_hash );
+                } else {
+                    bobs_privkey = "ba".repeat( 32 );
+                    bobs_pubkey = nobleSecp256k1.getPublicKey( bobs_privkey, true ).substring( 2 );
+                    var bobs_initial_secret = altos.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
+                    var bobs_initial_revocation_hash = altos.rmd160( altos.hexToBytes( bobs_initial_secret ) );
+                    altos.bobs_revocation_preimages.push( bobs_initial_secret );
+                    altos.bobs_revocation_hashes.push( bobs_initial_revocation_hash );
+                    console.log( `Bob's pubkey and revocation hash:` );
+                    console.log( JSON.stringify( [ bobs_pubkey, bobs_initial_revocation_hash ] ) );
+                    var alices_pubkey_and_hash = JSON.parse( prompt( `Enter Alice's pubkey and revocation hash` ) );
+                    alices_pubkey = alices_pubkey_and_hash[ 0 ];
+                    var alices_initial_revocation_hash = alices_pubkey_and_hash[ 1 ];
+                    altos.alices_revocation_hashes.push( alices_initial_revocation_hash );
+                }
+                altos.alices_address = tapscript.Address.fromScriptPubKey( [ "OP_1", alices_pubkey ], altos.network );
+                altos.bobs_address = tapscript.Address.fromScriptPubKey( [ "OP_1", bobs_pubkey ], altos.network );
+                var multisig_scripts = [ [ alices_pubkey, "OP_CHECKSIG", bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ] ];
+                altos.multisig = altos.makeAddress( multisig_scripts );
+                var multisig_or_alice_scripts = [
+                    [ alices_pubkey, "OP_CHECKSIG", bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ],
+                    //TODO: change the 10 to 4032
+                    [ 10, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", alices_pubkey, "OP_CHECKSIG" ],
+                ];
+                altos.multisig_or_alice = altos.makeAddress( multisig_or_alice_scripts );
+                var multisig_or_bob_scripts = [
+                    [ alices_pubkey, "OP_CHECKSIG", bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ],
+                    //TODO: change the 10 to 4032
+                    [ 10, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", bobs_pubkey, "OP_CHECKSIG" ],
+                ];
+                altos.multisig_or_bob = altos.makeAddress( multisig_or_bob_scripts );
+                var txid = prompt( `send some sats to this address and give the txid:\n\n${altos.multisig}` );
+                var vout = Number( prompt( `and the vout` ) );
+                var amnt = Number( prompt( `and the amount` ) );
+                altos.multisig_utxo_info = {
+                    txid,
+                    vout,
+                    amnt,
+                }
+                altos.balances_according_to_alice = [ amnt, 0 ];
+                altos.balances_according_to_bob = [ amnt, 0 ];
+                alert( `Yay, your channel is funded! Enter the command 'altos.alice_send()' or 'altos.bob_send()' in your browser console to have one party send the other an off-chain payment` );
+            }
+            window.onload = () => {setTimeout(()=>{init();})}
+        </script>
+    </body>
+</html>
