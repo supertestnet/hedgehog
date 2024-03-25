@@ -16,8 +16,9 @@
                         bobs_pubkey: null,
                         scripts: [],
                         trees: [],
-                        prev_balances: [],
                         multisig_utxo_info: {},
+                        alice_should_reveal: false,
+                        bob_should_reveal: false,
                         balances_according_to_alice: [],
                         balances_according_to_bob: [],
                         alices_offchain_tx_info: [],
@@ -109,7 +110,6 @@
                     if ( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500 < 1330 && !initialization ) conf = confirm( `if you send this amount your remaining balance will be less than 1300 sats. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended. Click cancel to cancel or click ok to proceed` );
                     else conf = true;
                     if ( !conf ) return;
-                    hedgehog.state[ "channel_0" ].prev_balances = hedgehog.state[ "channel_0" ].balances_according_to_alice;
                     var zero_out_alices_balance;
                     if ( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500 < 330 ) zero_out_alices_balance = true;
                     var zero_out_bobs_balance;
@@ -126,7 +126,7 @@
                     //they should not revoke their ability to do so.
                     if ( hedgehog.find_latest_time_i_received( "alice" ) > -1 ) reveal_secret = true;
                     if ( reveal_secret ) {
-                        var secret_to_reveal = hedgehog.state[ "channel_0" ].alices_revocation_preimages[ hedgehog.state[ "channel_0" ].alices_revocation_preimages.length - 1 ];
+                        var secret_to_reveal = hedgehog.state[ "channel_0" ].alices_revocation_preimages[ hedgehog.state[ "channel_0" ].alices_revocation_preimages.length - 2 ];
                         var alices_new_secret = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
                         alices_revocation_hash = hedgehog.rmd160( hedgehog.hexToBytes( alices_new_secret ) );
                         hedgehog.state[ "channel_0" ].alices_revocation_preimages.push( alices_new_secret );
@@ -210,7 +210,8 @@
                     });
                     var tree = tree_2;
                     if ( reveal_secret ) {
-                        hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "secret" ] = secret_to_reveal;
+                        if ( hedgehog.state[ "channel_0" ].alice_should_reveal ) hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "secret" ] = secret_to_reveal;
+                        else hedgehog.state[ "channel_0" ].alice_should_reveal = true;
                         hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "force_close_sig_1" ] = force_close_sig_1;
                         hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "force_close_sig_2" ] = force_close_sig_2;
                     }
@@ -240,6 +241,8 @@
                     var txid = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "txid" ];
                     var vout = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "vout" ];
                     var amnt = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "amnt" ];
+                    if ( hedgehog.state[ "channel_0" ].alice_should_reveal ) var alices_previous_revocation_hash = hedgehog.state[ "channel_0" ].alices_revocation_hashes[ hedgehog.state[ "channel_0" ].alices_revocation_hashes.length - 2 ];
+                    else var alices_previous_revocation_hash;
                     var alices_revocation_hash = hedgehog.state[ "channel_0" ].alices_revocation_hashes[ hedgehog.state[ "channel_0" ].alices_revocation_hashes.length - 1 ];
                     var bobs_revocation_hash = hedgehog.state[ "channel_0" ].bobs_revocation_hashes[ hedgehog.state[ "channel_0" ].bobs_revocation_hashes.length - 1 ];
                     var scripts = hedgehog.bobs_revocation_script( bobs_revocation_hash );
@@ -341,7 +344,7 @@
                             if ( alice_must_reveal_secret ) hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_4" ] = force_close_sig_4;
                         }
                     }
-                    if ( ( alice_must_reveal_secret && !alices_info[ "secret" ] ) || ( alice_must_reveal_secret && alices_info[ "secret" ] && hedgehog.rmd160( hedgehog.hexToBytes( alices_info[ "secret" ] ) ) != alices_revocation_hash ) ) {
+                    if ( ( alice_must_reveal_secret && hedgehog.state[ "channel_0" ].alice_should_reveal && !alices_info[ "secret" ] ) || ( alice_must_reveal_secret && alices_info[ "secret" ] && hedgehog.rmd160( hedgehog.hexToBytes( alices_info[ "secret" ] ) ) != alices_previous_revocation_hash ) ) {
                         alert( `nevermind, Alice didn't reveal her secret` );
                         return hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1, 1 );
                     }
@@ -357,9 +360,12 @@
                         }
                         var past_txdata = tapscript.Tx.create( past_tx );
                         var past_txid = tapscript.Tx.util.getTxid( past_txdata );
+                        var prev_txid = hedgehog.state[ "channel_0" ].txids_bob_watches_for[ "order" ][ hedgehog.state[ "channel_0" ].txids_bob_watches_for[ "order" ].length - 1 ];
+                        if ( "secret" in alices_info && hedgehog.state[ "channel_0" ].alice_should_reveal ) hedgehog.state[ "channel_0" ].txids_bob_watches_for[ prev_txid ][ "secret" ] = alices_info[ "secret" ];
+                        if ( !hedgehog.state[ "channel_0" ].alice_should_reveal && alice_must_reveal_secret ) hedgehog.state[ "channel_0" ].alice_should_reveal = true;
                         hedgehog.state[ "channel_0" ].txids_bob_watches_for[ "order" ].push( past_txid );
                         hedgehog.state[ "channel_0" ].txids_bob_watches_for[ past_txid ] = {
-                            secret: alices_info[ "secret" ],
+                            secret: "",
                             past_tx,
                             index_of_tx_info_containing_recovery_scripts: hedgehog.find_latest_time_i_sent( "bob" ),
                         }
@@ -425,7 +431,6 @@
                     if ( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500 < 1330 && !initialization ) conf = confirm( `if you send this amount your remaining balance will be less than 1300 sats. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended. Click cancel to cancel or click ok to proceed` );
                     else conf = true;
                     if ( !conf ) return;
-                    hedgehog.state[ "channel_0" ].prev_balances = hedgehog.state[ "channel_0" ].balances_according_to_bob;
                     var zero_out_alices_balance;
                     if ( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] + amt_to_send < 330 ) zero_out_alices_balance = true;
                     var zero_out_bobs_balance;
@@ -442,7 +447,7 @@
                     //they should not revoke their ability to do so.
                     if ( hedgehog.find_latest_time_i_received( "bob" ) > -1 ) reveal_secret = true;
                     if ( reveal_secret ) {
-                        var secret_to_reveal = hedgehog.state[ "channel_0" ].bobs_revocation_preimages[ hedgehog.state[ "channel_0" ].bobs_revocation_preimages.length - 1 ];
+                        var secret_to_reveal = hedgehog.state[ "channel_0" ].bobs_revocation_preimages[ hedgehog.state[ "channel_0" ].bobs_revocation_preimages.length - 2 ];
                         var bobs_new_secret = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
                         bobs_revocation_hash = hedgehog.rmd160( hedgehog.hexToBytes( bobs_new_secret ) );
                         hedgehog.state[ "channel_0" ].bobs_revocation_preimages.push( bobs_new_secret );
@@ -526,7 +531,8 @@
                     });
                     var tree = tree_2;
                     if ( reveal_secret ) {
-                        hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "secret" ] = secret_to_reveal;
+                        if ( hedgehog.state[ "channel_0" ].bob_should_reveal ) hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "secret" ] = secret_to_reveal;
+                        else hedgehog.state[ "channel_0" ].bob_should_reveal = true;
                         hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "force_close_sig_1" ] = force_close_sig_1;
                         hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "force_close_sig_2" ] = force_close_sig_2;
                     }
@@ -556,6 +562,8 @@
                     var txid = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "txid" ];
                     var vout = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "vout" ];
                     var amnt = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "amnt" ];
+                    if ( hedgehog.state[ "channel_0" ].bob_should_reveal ) var bobs_previous_revocation_hash = hedgehog.state[ "channel_0" ].bobs_revocation_hashes[ hedgehog.state[ "channel_0" ].bobs_revocation_hashes.length - 2 ];
+                    else var bobs_previous_revocation_hash;
                     var alices_revocation_hash = hedgehog.state[ "channel_0" ].alices_revocation_hashes[ hedgehog.state[ "channel_0" ].alices_revocation_hashes.length - 1 ];
                     var bobs_revocation_hash = hedgehog.state[ "channel_0" ].bobs_revocation_hashes[ hedgehog.state[ "channel_0" ].bobs_revocation_hashes.length - 1 ];
                     var scripts = hedgehog.alices_revocation_script( alices_revocation_hash );
@@ -657,7 +665,7 @@
                             if ( bob_must_reveal_secret ) hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_4" ] = force_close_sig_4;
                         }
                     }
-                    if ( ( bob_must_reveal_secret && !bobs_info[ "secret" ] ) || ( bob_must_reveal_secret && bobs_info[ "secret" ] && hedgehog.rmd160( hedgehog.hexToBytes( bobs_info[ "secret" ] ) ) != bobs_revocation_hash ) ) {
+                    if ( ( bob_must_reveal_secret && hedgehog.state[ "channel_0" ].bob_should_reveal && !bobs_info[ "secret" ] ) || ( bob_must_reveal_secret && bobs_info[ "secret" ] && hedgehog.rmd160( hedgehog.hexToBytes( bobs_info[ "secret" ] ) ) != bobs_previous_revocation_hash ) ) {
                         alert( `nevermind, Bob didn't reveal his secret` );
                         return hedgehog.state[ "channel_0" ].alices_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1, 1 );
                     }
@@ -673,9 +681,12 @@
                         }
                         var past_txdata = tapscript.Tx.create( past_tx );
                         var past_txid = tapscript.Tx.util.getTxid( past_txdata );
+                        var prev_txid = hedgehog.state[ "channel_0" ].txids_alice_watches_for[ "order" ][ hedgehog.state[ "channel_0" ].txids_alice_watches_for[ "order" ].length - 1 ];
+                        if ( "secret" in bobs_info && hedgehog.state[ "channel_0" ].bob_should_reveal ) hedgehog.state[ "channel_0" ].txids_alice_watches_for[ prev_txid ][ "secret" ] = bobs_info[ "secret" ];
+                        if ( !hedgehog.state[ "channel_0" ].bob_should_reveal && bob_must_reveal_secret ) hedgehog.state[ "channel_0" ].bob_should_reveal = true;
                         hedgehog.state[ "channel_0" ].txids_alice_watches_for[ "order" ].push( past_txid );
                         hedgehog.state[ "channel_0" ].txids_alice_watches_for[ past_txid ] = {
-                            secret: bobs_info[ "secret" ],
+                            secret: "",
                             past_tx,
                             index_of_tx_info_containing_recovery_scripts: hedgehog.find_latest_time_i_sent( "alice" ),
                         }
