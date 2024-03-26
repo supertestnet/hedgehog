@@ -97,5 +97,4 @@ I have an idea for how to use hedgehog channels to build a federated coinpool th
 
 # Support my work
 
-bc1p8sef2fvcfta8fzn43dpler2r7x8zgypja68f4cytcu4x7halmk4skjuqyq
-# 
+bc1qefhunyf8rsq77f38k07hn2e5njp0acxhlheksn
