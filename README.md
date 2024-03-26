@@ -1,5 +1,5 @@
 # Hedgehog
-A protocol for asynchronous layer two bitcoin payments
+A protocol for improved layer two bitcoin payments
 
 # Introduction
 
@@ -9,7 +9,7 @@ Hedgehog is a protocol for two party payment channels. Hedgehog channels are sim
 - State updates only require the sender to propose an update and the recipient to accept it
 - The recipient can wait to accept a state change til they want to propose another one
 
-The properties mentioned above allow for asynchronous payments. The user experience is similar to ecash protocols like cashu or fedimint, except with no server. If you have a channel with someone, you can -- without their assistance -- create a payment for them, embed it in a piece of text (think of it like a cheque), and send it to them via email or some other communication method. Then you can go offline. When they get online, they can either accept the state change (the cheque) and update their balance without your further assistance, or they can reject it. If they accept the state change (the cheque) they can even use their new balance to pay you back later by making another state change (another cheque) that builds on the previous state change (i.e. spends the cheque to make a new cheque). And they can send the new state change (the new cheque) to you even if you are still offline. Or, if they reject your state change, they can propose an alternative one and wait for you to accept that.
+The properties mentioned above allow for an improved payment experience. Using hedgehog feels similar to using an ecash protocol like cashu or fedimint, except with no server. If you have a channel with someone, you can -- without their assistance -- create a payment for them, embed it in a piece of text (think of it like a cheque), and send it to them via email or some other communication method. Then you can go offline. When they get online, they can either accept the state change (the cheque) and update their balance without your further assistance, or they can reject it. If they accept the state change (the cheque) they can even use their new balance to pay you back later by making another state change (another cheque) that builds on the previous state change (i.e. spends the cheque to make a new cheque). And they can send the new state change (the new cheque) to you even if you are still offline. Or, if they reject your state change, they can propose an alternative one and wait for you to accept that.
 
 # How hedgehog works
 
