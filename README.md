@@ -41,20 +41,20 @@ Bob can create a signature that sends money from that address to Alice, but, sin
 
 With these two primitives in hand, suppose Alice opens a channel with Bob by sending 10_000 sats into a standard multisig `(Alice && Bob)`. Alice can send Bob 2_000 sats "off chain" -- while Bob is offline -- by sending him two signatures. The first signature is valid for a transaction that (a) creates a 330 sat dust utxo, revocable by Bob (i.e. the dust utxo is locked to a `revocable script`) and (b) sends the change (9_670 sats, minus a fee, so more like 9_500 sats) back to the multisig `(Alice && Bob)`. The second signature is valid for a transaction that sends 7_000 sats to Bob from the multisig `(Alice && Bob)` AND the utxo locked to the `revocable script.` (So this second transaction's inputs contain 9_500 + 330 sats together, and the utxo locked to the `revocable script` serves as a `revocable connector`.) This second transaction sends the change, 2_830 sats (minus a fee, so more like 2_500 sats) to Alice.
 
-Alice’s new, off-chain balance: 2_500 sats (down ~2000 sats & a fee)
-Bob’s new, off-chain balance: 7_000 sats (up ~2000 sats)
+Alice’s new, off-chain balance: 7_500 sats (down ~2000 sats & a fee)
+Bob’s new, off-chain balance: 2_000 sats (up ~2000 sats)
 This is "State 2." (State 1 was just Alice: 10_000 sats, Bob: 0 sats)
 
 When Bob eventually gets online, he can accept Alice’s disbursement (State 2) like this: cosign and broadcast the first transaction, which creates the revocable utxo; wait 2016 blocks for the timelock on the revocable utxo to expire (relative timelocks start "counting" as soon as the utxo exists); then cosign and broadcast the second transaction. But there's a better option: Bob can keep the signatures on hand and wait because he might want to send some money back to Alice later and there's no reason to "close this channel" yet.
 
 # Bob’s turn
 
-Suppose Bob goes for the latter option and 5 days later he decides he wants to send 3_000 sats to Alice. He can revoke the dust utxo by sending Alice `B_S` and, along with it, a signature that is valid for a transaction that sends the entire channel balance to Alice, but only if Alice discloses `B_S`. (So this transaction spends two inputs, 9_500 + 330, and creates one output for Alice, 9_830, but more like 9_500 due to fees, and it is only valid if Alice knows `B_S` -- which she now does -- and if Bob tries to close the channel in State 1.)
+Suppose Bob goes for the latter option and 5 days later he decides he wants to send 1_000 sats to Alice. He can revoke the dust utxo by sending Alice `B_S` and, along with it, a signature that is valid for a transaction that sends the entire channel balance to Alice, but only if Alice discloses `B_S`. (So this transaction spends two inputs, 9_500 + 330, and creates one output for Alice, 9_830, but more like 9_500 due to fees, and it is only valid if Alice knows `B_S` -- which she now does -- and if Bob tries to close the channel in State 1.)
 
-With this pair of data, Bob also sends Alice two other signatures: the first is valid for a transaction that spends from the original multisig `(Alice && Bob)`, the “on-chain” one that still has 10_000 sats in it, to (a) create a *different* revocable connector with 330 sats in it, revocable by *Alice* this time and (b) send the change (9_670 sats, minus a fee, so more like 9_500 sats) back to the multisig `(Alice && Bob)`. The second signature is valid for a transaction that sends 6_000 sats to Alice from the multisig AND the revocable utxo (so its inputs contain 9_500 + 330 sats together) and sends the change, 3_830 sats (minus a fee, so more like 3_500 sats) to Bob.
+With this pair of data, Bob also sends Alice two other signatures: the first is valid for a transaction that spends from the original multisig `(Alice && Bob)`, the “on-chain” one that still has 10_000 sats in it, to (a) create a *different* revocable connector with 330 sats in it, revocable by *Alice* this time and (b) send the change (9_670 sats, minus a fee, so more like 9_500 sats) back to the multisig `(Alice && Bob)`. The second signature is valid for a transaction that sends 9_000 sats to Alice from the multisig AND the revocable utxo (so its inputs contain 9_500 + 330 sats together) and sends the change, 830 sats (minus a fee, so more like 500 sats) to Bob.
 
-Alice’s new, off-chain balance: 6_000 sats (up ~3000 sats from her previous position)
-Bob’s new, off-chain balance: 3_500 sats (down ~3000 sats & a fee from his previous position)
+Alice’s new, off-chain balance: 9_000 sats (up ~1000 sats from her previous position)
+Bob’s new, off-chain balance: 500 sats (down ~1000 sats & a fee from his previous position)
 This is "State 3."
 
 Now Alice is in the exact same position Bob was. Like Bob, she can accept Bob's disbursement (State 3) like this: cosign and broadcast the first transaction, which creates the revocable utxo; wait 2016 blocks for the timelock on the revocable utxo to expire; then cosign and broadcast the second transaction. Like Bob, she may also keep the signatures on hand and wait because she might want to send some money back to Bob later.
