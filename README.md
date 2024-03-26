@@ -94,3 +94,8 @@ That way the party thought to have died may, if they did not die, still use thei
 # Still want more?
 
 I have an idea for how to use hedgehog channels to build a federated coinpool that I call Burrow. It has a bunch of cool properties but it requires a coordination server. See more [here](https://gist.github.com/supertestnet/14addffae669058a9bb9df2e2608ff7f).
+
+# Support my work
+
+bc1p8sef2fvcfta8fzn43dpler2r7x8zgypja68f4cytcu4x7halmk4skjuqyq
+# 
