@@ -1,5 +1,5 @@
 # Hedgehog
-An experiment in offline lightning payments
+A protocol for asynchronous layer two bitcoin payments
 
 # Introduction
 
