@@ -95,6 +95,10 @@ That way the party thought to have died may, if they did not die, still use thei
 
 I have an idea for how to use hedgehog channels to build a federated coinpool that I call Burrow. It has a bunch of cool properties but it requires a coordination server. See more [here](https://gist.github.com/supertestnet/14addffae669058a9bb9df2e2608ff7f).
 
+# Credits
+
+Jeremy Rubin, citing nullc and sipa, posted on the bitcoin mailing list about a similar idea: https://lists.linuxfoundation.org/pipermail/bitcoin-dev/2021-March/018615.html
+
 # Support my work
 
 bc1qefhunyf8rsq77f38k07hn2e5njp0acxhlheksn
