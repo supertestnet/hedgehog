@@ -90,3 +90,7 @@ and, on the other hand,
 ```
 
 That way the party thought to have died may, if they did not die, still use their counterparty’s pregenerated signature, plus one of their own making, to distribute the funds according to the latest state, but if they did die, the money is not stuck forever. After 4032 blocks, their counterparty can take it.
+
+# Still want more?
+
+I have an idea for how to use Burrow to build a federated coinpool with a bunch of cool properties, by introducing a coordination server. See more [here](https://gist.github.com/supertestnet/14addffae669058a9bb9df2e2608ff7f).
