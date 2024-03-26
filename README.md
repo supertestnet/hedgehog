@@ -1,6 +1,9 @@
 # Hedgehog
 A protocol for improved layer two bitcoin payments
 
+# Video
+https://www.youtube.com/watch?v=-JeBDVPH1gA
+
 # Introduction
 
 Hedgehog is a protocol for two party payment channels. Hedgehog channels are similar to lightning channels but with a few comparative benefits.
