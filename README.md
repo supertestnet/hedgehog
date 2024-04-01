@@ -16,7 +16,7 @@ The properties mentioned above allow for an improved payment experience. Using h
 
 # How hedgehog works
 
-Hedgehog is bult on a primitive in bitcoin script called "revocable connectors." To make revocable connectors, you need two even more primitive primitives: revocable scripts and connector outputs.
+Hedgehog is built on a primitive in bitcoin script called "revocable connectors." To make revocable connectors, you need two even more primitive primitives: revocable scripts and connector outputs.
 
 ## First primitive: revocable scripts
 
