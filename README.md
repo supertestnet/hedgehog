@@ -28,7 +28,7 @@ or
 (Bob after 2016 blocks) OR (Alice && B_S) <-- this is revocable by Bob
 ```
 
-`A_S` is "Alice's Secret," a value Alice may reveal to Bob if she wants to revoke her ability to safely receive money in an address containing the top script. `B_S` is a similar secret Bob may reveal to Alice to revoke the bottom script.
+`A_S` is "Alice's Secret", a value Alice may reveal to Bob if she wants to revoke her ability to safely receive money in an address containing the top script. `B_S` is a similar secret Bob may reveal to Alice to revoke the bottom script.
 
 ## Second primitive: connector outputs
 
