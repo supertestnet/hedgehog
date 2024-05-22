@@ -2,34 +2,44 @@
 <html>
     <head>
         <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, user-scalable=no">
+<!--
         <script src="https://unpkg.com/@cmdcode/tapscript"></script>
         <script src="https://supertestnet.github.io/hedgehog/noble-secp256k1.js"></script>
         <script src="https://supertestnet.github.io/hedgehog/rmd160.js"></script>
+        <script src="file:///home/supertestnet/hedgehog_project/tapscript.js"></script>
+        <script src="file:///home/supertestnet/hedgehog_project/noble-secp256k1.js"></script>
+        <script src="file:///home/supertestnet/hedgehog_project/rmd160.js"></script>
+-->
+        <script src="https://supertestnet.github.io/hedgehog-advanced/tapscript.js"></script>
+        <script src="https://supertestnet.github.io/hedgehog-advanced/noble-secp256k1.js"></script>
+        <script src="https://supertestnet.github.io/hedgehog-advanced/rmd160.js"></script>
         <script>
             var hedgehog = {
-                network: "testnet",
-                state: {
-                    channel_0: {
-                        alices_privkey: null,
-                        bobs_privkey: null,
-                        alices_pubkey: null,
-                        bobs_pubkey: null,
-                        scripts: [],
-                        trees: [],
-                        multisig_utxo_info: {},
-                        alice_should_reveal: false,
-                        bob_should_reveal: false,
-                        balances_according_to_alice: [],
-                        balances_according_to_bob: [],
-                        alices_offchain_tx_info: [],
-                        bobs_offchain_tx_info: [],
-                        alices_revocation_preimages: [],
-                        alices_revocation_hashes: [],
-                        bobs_revocation_preimages: [],
-                        bobs_revocation_hashes: [],
-                        txids_alice_watches_for: {order: []},
-                        txids_bob_watches_for: {order: []},
-                    },
+                network: "regtest",
+                state: {},
+                keypairs: {},
+                state_obj: {
+                    alices_privkey: null,
+                    bobs_privkey: null,
+                    alices_pubkey: null,
+                    bobs_pubkey: null,
+                    multisig_script: null,
+                    multisig_tree: null,
+                    multisig_utxo_info: {},
+                    i_was_last_to_send: false,
+                    alice_can_revoke: [],
+                    bob_can_revoke: [],
+                    balances: [],
+                    balances_before_most_recent_send: [],
+                    balances_before_most_recent_receive: [],
+                    alices_revocation_preimages: [],
+                    alices_revocation_hashes: [],
+                    bobs_revocation_preimages: [],
+                    bobs_revocation_hashes: [],
+                    txids_to_watch_for: {},
+                    latest_force_close_txs: [],
+                    extra_outputs: [],
                 },
                 hexToBytes: hex => Uint8Array.from( hex.match( /.{1,2}/g ).map( byte => parseInt( byte, 16 ) ) ),
                 bytesToHex: bytes => bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, "0" ), "" ),
@@ -38,6 +48,20 @@
                     var hash = RIPEMD160.create();
                     hash.update( new Uint8Array( s ) );
                     return hedgehog.bytesToHex( hash.digest() );
+                },
+                isValidHex: hex => {
+                    if ( !hex ) return;
+                    var length = hex.length;
+                    if ( length % 2 ) return;
+                    try {
+                        var bigint = BigInt( "0x" + hex, "hex" );
+                    } catch( e ) {
+                        return;
+                    }
+                    var prepad = bigint.toString( 16 );
+                    var i; for ( i=0; i<length; i++ ) prepad = "0" + prepad;
+                    var padding = prepad.slice( -Math.abs( length ) );
+                    return ( padding === hex );
                 },
                 getVin: ( txid, vout, amnt, addy, sequence ) => {
                     var input = {
@@ -55,864 +79,657 @@
                     value: amnt,
                     scriptPubKey: tapscript.Address.toScriptPubKey( addy ),
                 }),
-                makeAddress: scripts => {
+                makeAddress: ( chan_id, scripts ) => {
                     var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
-                    hedgehog.state[ "channel_0" ].scripts.push( scripts );
-                    hedgehog.state[ "channel_0" ].trees.push( tree );
                     var pubkey = "ab".repeat( 32 );
                     var [ tpubkey ] = tapscript.Tap.getPubKey( pubkey, { tree });
                     return tapscript.Address.p2tr.fromPubKey( tpubkey, hedgehog.network );
                 },
-                find_latest_time_i_received: user => {
-                    if ( user == "bob" ) var temp = [...hedgehog.state[ "channel_0" ].bobs_offchain_tx_info].reverse();
-                    else var temp = [...hedgehog.state[ "channel_0" ].alices_offchain_tx_info].reverse();
-                    var index_i_seek = -1;
-                    temp.every( ( item, index ) => {
-                        if ( "received" in item ) {
-                            index_i_seek = index;
-                            return;
+                makeAlicesRevocationScript: chan_id => ([
+                    [ hedgehog.state[ chan_id ].alices_pubkey, "OP_CHECKSIG", hedgehog.state[ chan_id ].bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ],
+                    [ "OP_RIPEMD160", hedgehog.state[ chan_id ].alices_revocation_hashes[ hedgehog.state[ chan_id ].alices_revocation_hashes.length - 1 ], "OP_EQUALVERIFY", hedgehog.state[ chan_id ].bobs_pubkey, "OP_CHECKSIG" ],
+                    //TODO: change the 10 to 4032
+                    [ 10, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", hedgehog.state[ chan_id ].bobs_pubkey, "OP_CHECKSIG" ],
+                ]),
+                makeBobsRevocationScript: chan_id => ([
+                    [ hedgehog.state[ chan_id ].alices_pubkey, "OP_CHECKSIG", hedgehog.state[ chan_id ].bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ],
+                    [ "OP_RIPEMD160", hedgehog.state[ chan_id ].bobs_revocation_hashes[ hedgehog.state[ chan_id ].bobs_revocation_hashes.length - 1 ], "OP_EQUALVERIFY", hedgehog.state[ chan_id ].alices_pubkey, "OP_CHECKSIG" ],
+                    //TODO: change the 10 to 4032
+                    [ 10, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", hedgehog.state[ chan_id ].alices_pubkey, "OP_CHECKSIG" ],
+                ]),
+                openChannel: async push_all_funds_to_counterparty => {
+                    //there are three ways to open a channel:
+                    //the first way is as Bob, opening a channel to Alice unilaterally
+                    //the code for that after this "if" statement because a
+                    //unilateral channel open requires pushing all funds to your counterparty
+                    //the second way is as Alice, accepting a channel Bob already unilaterally opened
+                    //the third way is as Alice, opening a new channel cooperatively with Bob
+                    //the second and third ways are handled in the first "if" statement below
+                    //in theory there are two more ways: Bob could open a channel to Alice cooperatively
+                    //and thus keep some or all of the funds on his side, or Alice could open a channel
+                    //to Bob unilaterally and thus push all funds to Bob's side. To do these examples,
+                    //just have Alice open a channel with push_all_funds_to_counterparty set to true
+                    //or have Bob open a channel with push_all_funds_to_counterparty set to false
+                    if ( !push_all_funds_to_counterparty ) {
+                        var has_data = confirm( `Click ok if someone sent you channel opening info or cancel if you are opening this channel yourself` );
+                        if ( has_data ) {
+                            var data = JSON.parse( prompt( `Enter the data your counterparty sent you` ) );
+                            //TODO: validate the data so you don't acccidentally accept irredeemable coins
+                            //or crash your wallet
+
+                            //create the state object
+                            var pubkey = data[ "recipient_pubkey" ];
+                            if ( !( pubkey in hedgehog.keypairs ) ) return alert( `Your counterparty tried to scam you! Do not interact with them any further` );
+                            var privkey = hedgehog.keypairs[ pubkey ][ "privkey" ];
+                            var preimage = hedgehog.keypairs[ pubkey ][ "preimage" ];
+                            var chan_id = data[ "chan_id" ];
+                            hedgehog.state[ chan_id ] = hedgehog.state_obj;
+                            hedgehog.state[ chan_id ][ "alices_privkey" ] = privkey;
+                            hedgehog.state[ chan_id ][ "alices_pubkey" ] = pubkey;
+                            hedgehog.state[ chan_id ][ "bobs_pubkey" ] = data[ "sender_pubkey" ];
+                            hedgehog.state[ chan_id ][ "multisig_utxo_info" ] = data[ "utxo_info" ];
+                            hedgehog.state[ chan_id ].alices_revocation_preimages.push( preimage );
+                            var hash = hedgehog.rmd160( hedgehog.hexToBytes( preimage ) );
+                            hedgehog.state[ chan_id ].alices_revocation_hashes.push( hash );
+                            hedgehog.state[ chan_id ].alices_address = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ chan_id ].alices_pubkey ], hedgehog.network );
+                            hedgehog.state[ chan_id ].bobs_address = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ chan_id ].bobs_pubkey ], hedgehog.network );
+                            var multisig_script = [ hedgehog.state[ chan_id ].alices_pubkey, "OP_CHECKSIG", hedgehog.state[ chan_id ].bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ];
+                            var multisig_tree = [ tapscript.Tap.encodeScript( multisig_script ) ];
+                            hedgehog.state[ chan_id ].multisig_script = multisig_script;
+                            hedgehog.state[ chan_id ].multisig_tree = multisig_tree;
+                            hedgehog.state[ chan_id ].multisig = hedgehog.makeAddress( chan_id, [ multisig_script ] );
+
+                            //temporarily pretend the entire balance is on Bob's side so he can
+                            //send it to Alice using the regular send command
+                            var amnt = data[ "amnt" ];
+                            hedgehog.state[ chan_id ].balances = [ 0, amnt ];
+                            var opening = true;
+
+                            //validate the initial state using the regular "receive" function
+                            var opened = await hedgehog.receive( {amnt: amnt - 500 - 500, sig_1: data[ "sig_1" ], sig_3: data[ "sig_3" ], chan_id: data[ "chan_id" ], hash: data[ "hash" ]} );
+                            if ( opened !== true ) return;
+
+                            //update the state to reflect alice's ability to withdraw 100%
+                            hedgehog.state[ chan_id ].balances = [ amnt, 0 ];
+
+                            //update the send/receive/close buttons to use this channel
+                            $( '.send_btn' ).onclick = () => {console.log( "send this data to your recipient:" );console.log( JSON.stringify( hedgehog.send( chan_id ) ) );}
+                            $( '.receive_btn' ).onclick = () => {hedgehog.receive();}
+                            $( '.close_channel' ).onclick = () => {hedgehog.closeChannel( chan_id );}
+                            alert( `yay, your channel is open!` );
                         }
-                        return true;
-                    });
-                    if ( index_i_seek < 0 ) return -1;
-                    return temp.length - 1 - index_i_seek;
+                        return;
+                    }
+
+                    //handle the case where Bob opens a channel to Alice unilaterally
+                    //start by preparing the state object
+                    var chan_id = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
+                    hedgehog.state[ chan_id ] = hedgehog.state_obj;
+                    hedgehog.state[ chan_id ].bobs_privkey = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() );
+                    hedgehog.state[ chan_id ].bobs_pubkey = nobleSecp256k1.getPublicKey( hedgehog.state[ chan_id ].bobs_privkey, true ).substring( 2 );
+                    var alices_pubkey_and_hash = JSON.parse( prompt( `Enter Alice's pubkey and revocation hash` ) );
+                    hedgehog.state[ chan_id ].alices_pubkey = alices_pubkey_and_hash[ 0 ];
+                    hedgehog.state[ chan_id ].alices_revocation_hashes.push( alices_pubkey_and_hash[ 1 ] );
+                    hedgehog.state[ chan_id ].alices_address = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ chan_id ].alices_pubkey ], hedgehog.network );
+                    hedgehog.state[ chan_id ].bobs_address = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ chan_id ].bobs_pubkey ], hedgehog.network );
+                    var multisig_script = [ hedgehog.state[ chan_id ].alices_pubkey, "OP_CHECKSIG", hedgehog.state[ chan_id ].bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ];
+                    var multisig_tree = [ tapscript.Tap.encodeScript( multisig_script ) ];
+                    hedgehog.state[ chan_id ].multisig_script = multisig_script;
+                    hedgehog.state[ chan_id ].multisig_tree = multisig_tree;
+                    hedgehog.state[ chan_id ].multisig = hedgehog.makeAddress( chan_id, [ multisig_script ] );
+                    console.log( "address:", hedgehog.state[ chan_id ].multisig );
+
+                    var txid = prompt( `send some sats to this address and give the txid:\n\n${hedgehog.state[ chan_id ].multisig}` );
+                    var vout = Number( prompt( `and the vout` ) );
+                    var amnt = Number( prompt( `and the amount` ) );
+                    hedgehog.state[ chan_id ].multisig_utxo_info = {
+                        txid,
+                        vout,
+                        amnt,
+                    }
+
+                    //temporarily pretend the entire balance is on Bob's side so he can
+                    //send it to Alice using the regular send command
+                    hedgehog.state[ chan_id ].balances = [ 0, amnt ];
+
+                    //prepare the transaction that moves all funds to Alice's side
+                    var opening = true;
+                    var sigs_and_stuff = hedgehog.send( chan_id, amnt - 500 - 500, opening );
+                    sigs_and_stuff[ "amnt" ] = amnt;
+                    console.log( "send this data to your recipient:" );
+                    console.log( JSON.stringify( sigs_and_stuff ) );
+
+                    //update the state to reflect alice's ability to withdraw 100%
+                    hedgehog.state[ chan_id ].balances = [ amnt, 0 ];
+                    hedgehog.state[ chan_id ].balances_before_most_recent_receive = [ amnt, 0 ];
+
+                    //update the send/receive/close buttons to use this channel
+                    $( '.send_btn' ).onclick = () => {console.log( "send this data to your recipient:" );console.log( JSON.stringify( hedgehog.send( chan_id ) ) );}
+                    $( '.receive_btn' ).onclick = () => {hedgehog.receive();}
+                    $( '.close_channel' ).onclick = () => {hedgehog.closeChannel( chan_id );}
+                    alert( `yay, your channel is funded! send your counterparty the info in your console` );
                 },
-                find_latest_time_i_sent: user => {
-                    if ( user == "bob" ) var temp = [...hedgehog.state[ "channel_0" ].bobs_offchain_tx_info].reverse();
-                    else var temp = [...hedgehog.state[ "channel_0" ].alices_offchain_tx_info].reverse();
-                    var index_i_seek = -1;
-                    temp.every( ( item, index ) => {
-                        if ( !( "received" in item ) ) {
-                            index_i_seek = index;
-                            return;
+                send: ( chan_id, amnt, opening ) => {
+                    //automatically find out if I am Alice or Bob using the chan_id
+                    var am_alice = !!hedgehog.state[ chan_id ].alices_privkey;
+
+                    //if I am the previous sender, restore the state to what it was before
+                    //I last sent so I can overwrite my previous state update
+                    if ( hedgehog.state[ chan_id ].i_was_last_to_send ) {
+                        var current_balances = JSON.parse( JSON.stringify( hedgehog.state[ chan_id ].balances ) );
+                        hedgehog.state[ chan_id ].balances = hedgehog.state[ chan_id ].balances_before_most_recent_send;
+                        if ( am_alice ) {
+                            hedgehog.state[ chan_id ].bob_can_revoke.pop();
+                            hedgehog.state[ chan_id ].alices_revocation_preimages.pop();
+                            hedgehog.state[ chan_id ].alices_revocation_hashes.pop();
+                        } else {
+                            hedgehog.state[ chan_id ].alice_can_revoke.pop();
+                            hedgehog.state[ chan_id ].bobs_revocation_preimages.pop();
+                            hedgehog.state[ chan_id ].bobs_revocation_hashes.pop();
                         }
-                        return true;
+                    }
+
+                    //unless an amount is already given, prompt the user to enter an amount
+                    if ( !amnt ) amnt = Number( prompt( `Please enter an amount you want to send to your counterparty` ) );
+
+                    //update the amnt variable if necessary. For example,
+                    //if the prev balance was 0 for Bob but I sent him 5k,
+                    //current_balances would say he has 5k. If I am now
+                    //sending him 1k, amnt should be 6k, which is 
+                    //( current_balances[ 1 ] - prev_balance[ 1 ] ) + amnt
+                    if ( hedgehog.state[ chan_id ].i_was_last_to_send ) {
+                        if ( am_alice ) amnt = ( current_balances[ 1 ] - hedgehog.state[ chan_id ].balances[ 1 ] ) + amnt;
+                        else amnt = ( current_balances[ 0 ] - hedgehog.state[ chan_id ].balances[ 0 ] ) + amnt;
+                    }
+
+                    //create the revocation scripts so the recipient can revoke this state later
+                    if ( am_alice ) {
+                        var latest_scripts = hedgehog.makeBobsRevocationScript( chan_id );
+                        var revocable_address = hedgehog.makeAddress( chan_id, latest_scripts );
+                        hedgehog.state[ chan_id ].bob_can_revoke.push( [ revocable_address, latest_scripts ] );
+                    } else {
+                        var latest_scripts = hedgehog.makeAlicesRevocationScript( chan_id );
+                        var revocable_address = hedgehog.makeAddress( chan_id, latest_scripts );
+                        hedgehog.state[ chan_id ].alice_can_revoke.push( [ revocable_address, latest_scripts ] );
+                    }
+
+                    //create and sign the timeout tx in case your counterparty takes
+                    //too long to force close or disappears during a force closure
+                    var utxo_info = hedgehog.state[ chan_id ].multisig_utxo_info;
+                    var balances = hedgehog.state[ chan_id ].balances;
+                    var original_amnt = balances[ 0 ] + balances[ 1 ];
+                    //tx0 sends all the money from the multisig into alice_can_revoke
+                    //or bob_can_revoke (depending on who is sending)
+                    var tx0 = tapscript.Tx.create({
+                        vin: [hedgehog.getVin( utxo_info[ "txid" ], utxo_info[ "vout" ], original_amnt, hedgehog.state[ chan_id ][ "multisig" ] )],
+                        vout: [hedgehog.getVout( original_amnt - 500, revocable_address )],
                     });
-                    if ( index_i_seek < 0 ) return -1;
-                    return temp.length - 1 - index_i_seek;
-                },
-                alices_revocation_script: alices_revocation_hash => [
-                    //TODO: change the 5 to a 2016
-                    [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", hedgehog.state[ "channel_0" ].alices_pubkey, "OP_CHECKSIG" ],
-                    [ "OP_RIPEMD160", alices_revocation_hash, "OP_EQUALVERIFY", hedgehog.state[ "channel_0" ].bobs_pubkey, "OP_CHECKSIG" ],
-                    [ hedgehog.state[ "channel_0" ].alices_pubkey, "OP_CHECKSIG", hedgehog.state[ "channel_0" ].bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ],
-                ],
-                bobs_revocation_script: bobs_revocation_hash => [
-                    //TODO: change the 5 to a 2016
-                    [ 5, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", hedgehog.state[ "channel_0" ].bobs_pubkey, "OP_CHECKSIG" ],
-                    [ "OP_RIPEMD160", bobs_revocation_hash, "OP_EQUALVERIFY", hedgehog.state[ "channel_0" ].alices_pubkey, "OP_CHECKSIG" ],
-                    [ hedgehog.state[ "channel_0" ].alices_pubkey, "OP_CHECKSIG", hedgehog.state[ "channel_0" ].bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ],
-                ],
-                alice_send: ( amt_to_send, initialization ) => {
-                    if ( !amt_to_send ) amt_to_send = Number( prompt( `This is the current state of the channel:\n\nAlice: ${hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ]} sats\nBob: ${hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ]} sats\n\nEnter an amount you want Alice to send to Bob` ) );
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500 < 0 ) return alert( `you cannot send this amount, your remaining balance will be negative (accounting for 1000 sats in fees)! Send a smaller amount` );
-                    var conf;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500 < 1330 && !initialization ) conf = confirm( `if you send this amount your remaining balance will be less than 1300 sats. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended. Click cancel to cancel or click ok to proceed` );
-                    else conf = true;
-                    if ( !conf ) return;
-                    var zero_out_alices_balance;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500 < 330 ) zero_out_alices_balance = true;
-                    var zero_out_bobs_balance;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] + amt_to_send < 330 ) zero_out_bobs_balance = true;
-                    var txid = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "txid" ];
-                    var vout = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "vout" ];
-                    var amnt = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "amnt" ];
-                    var reveal_secret = false;
-                    var alices_revocation_hash = hedgehog.state[ "channel_0" ].alices_revocation_hashes[ hedgehog.state[ "channel_0" ].alices_revocation_hashes.length - 1 ];
-                    var bobs_revocation_hash = hedgehog.state[ "channel_0" ].bobs_revocation_hashes[ hedgehog.state[ "channel_0" ].bobs_revocation_hashes.length - 1 ];
-                    //a user does not need to reveal their secret if they haven't received any money
-                    //because revealing their secret revokes their ability to safely receive money
-                    //in a given state, and if they haven't received money in the current state,
-                    //they should not revoke their ability to do so.
-                    if ( hedgehog.find_latest_time_i_received( "alice" ) > -1 ) reveal_secret = true;
-                    if ( reveal_secret ) {
-                        var secret_to_reveal = hedgehog.state[ "channel_0" ].alices_revocation_preimages[ hedgehog.state[ "channel_0" ].alices_revocation_preimages.length - 2 ];
-                        var alices_new_secret = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
-                        alices_revocation_hash = hedgehog.rmd160( hedgehog.hexToBytes( alices_new_secret ) );
-                        hedgehog.state[ "channel_0" ].alices_revocation_preimages.push( alices_new_secret );
-                        hedgehog.state[ "channel_0" ].alices_revocation_hashes.push( alices_revocation_hash );
-                    }
-                    var scripts = hedgehog.bobs_revocation_script( bobs_revocation_hash );
-                    var revocable = hedgehog.makeAddress( scripts );
-                    var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
-                    var txdata = tapscript.Tx.create({
-                        vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                        vout: [
-                            hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                            hedgehog.getVout( 330, revocable ),
-                        ],
+                    var tx0_id = tapscript.Tx.util.getTxid( tx0 );
+                    var alices_address = hedgehog.state[ chan_id ].alices_address;
+                    var bobs_address = hedgehog.state[ chan_id ].bobs_address;
+                    if ( am_alice ) var my_address = alices_address;
+                    else var my_address = bobs_address;
+                    var timeout_tx = tapscript.Tx.create({
+                        //TODO: change the sequence number (relative timelock) from 10 to 4032
+                        vin: [hedgehog.getVin( tx0_id, 0, original_amnt - 500, revocable_address, 10 )],
+                        vout: [hedgehog.getVout( original_amnt - 500 - 500, my_address )],
                     });
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 0 ][ 0 ] );
-                    var sig_1 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 0, { extension: target }).hex;
-                    var offchain_txid = tapscript.Tx.util.getTxid( txdata );
-                    {
-                        var to_bob = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ "channel_0" ].bobs_pubkey ] );
-                        var alices_alt_hash = reveal_secret ? hedgehog.state[ "channel_0" ].alices_revocation_hashes[ hedgehog.state[ "channel_0" ].alices_revocation_hashes.length - 2 ] : alices_revocation_hash;
-                        var alt_revocable_scripts = hedgehog.alices_revocation_script( alices_alt_hash );
-                        var alt_revocable = hedgehog.makeAddress( alt_revocable_scripts );
-                        var txdata = tapscript.Tx.create({
-                            vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                            vout: [
-                                hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                                hedgehog.getVout( 330, alt_revocable ),
-                            ],
-                        });
-                        var alt_txid = tapscript.Tx.util.getTxid( txdata );
-                        var txdata = tapscript.Tx.create({
-                            vin: [
-                                hedgehog.getVin( alt_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                                hedgehog.getVin( alt_txid, 1, 330, alt_revocable ),
-                            ],
-                            vout: [hedgehog.getVout( amnt - 330 - 500, to_bob )],
-                        });
-                        var penalty_target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 2 ][ 0 ] );
-                        var penalty_sig = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 0, { extension: penalty_target }).hex;
-                        var txdata = tapscript.Tx.create({
-                            vin: [
-                                hedgehog.getVin( alt_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                                hedgehog.getVin( alt_txid, 1, 330, alt_revocable ),
-                            ],
-                            vout: [
-                                hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500, hedgehog.state[ "channel_0" ].alices_address ),
-                                hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] + amt_to_send, hedgehog.state[ "channel_0" ].bobs_address ),
-                            ],
-                        });
-                        var force_close_sig_1 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 0, { extension: penalty_target }).hex;
-                        var penalty_target_2 = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ hedgehog.state[ "channel_0" ].scripts.length - 1 ][ 2 ] );
-                        var force_close_sig_2 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 1, { extension: penalty_target_2 }).hex;
+                    if ( am_alice ) var privkey = hedgehog.state[ chan_id ].alices_privkey;
+                    else var privkey = hedgehog.state[ chan_id ].bobs_privkey;
+                    var timeout_tx_script = latest_scripts[ 2 ];
+                    var timeout_tx_target = tapscript.Tap.encodeScript( timeout_tx_script );
+                    var timeout_tx_tree = latest_scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                    var timeout_sig = tapscript.Signer.taproot.sign( privkey, timeout_tx, 0, { extension: timeout_tx_target }).hex;
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: timeout_tx_tree, target: timeout_tx_target });
+                    timeout_tx.vin[ 0 ].witness = [ timeout_sig, timeout_tx_script, cblock ];
+                    hedgehog.state[ chan_id ].txids_to_watch_for[ tx0_id ] = {
+                        timeout_tx: tapscript.Tx.encode( timeout_tx ).hex,
                     }
-                    var prep_tx = {
-                        vin: [
-                            hedgehog.getVin( offchain_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                            //TODO: change the 5 to a 2016
-                            hedgehog.getVin( offchain_txid, 1, 330, revocable, 5 ),
-                        ],
-                        vout: [
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] - amt_to_send - 500 - 500, hedgehog.state[ "channel_0" ].alices_address ),
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] + amt_to_send, hedgehog.state[ "channel_0" ].bobs_address ),
-                        ],
+
+                    //create tx1 to distribute the funds however the sender wishes to do so
+                    var tx1 = tapscript.Tx.create({
+                        //TODO: change the sequence number (relative timelock) from 5 to 2016
+                        vin: [hedgehog.getVin( tx0_id, 0, original_amnt - 500, revocable_address, 5 )],
+                        vout: [],
+                    });
+
+                    //increase the recipient's balance by amnt and decrease the sender's by
+                    //amnt and two mining fees
+                    if ( am_alice ) {
+                        var amnt_for_alice = balances[ 0 ] - amnt - 500 - 500;
+                        var amnt_for_bob = balances[ 1 ] + amnt;
+                    } else {
+                        var amnt_for_alice = balances[ 0 ] + amnt;
+                        var amnt_for_bob = balances[ 1 ] - amnt - 500 - 500;
+                        if ( opening ) var amnt_for_bob = 0;
                     }
-                    if ( zero_out_alices_balance ) prep_tx[ "vout" ].splice( 0, 1 );
-                    if ( zero_out_bobs_balance ) prep_tx[ "vout" ].splice( 1, 1 );
-                    var txdata = tapscript.Tx.create( prep_tx );
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 1 ][ 0 ] );
-                    var tree_2 = hedgehog.state[ "channel_0" ].trees[ 1 ];
-                    var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tree_2, target });
-                    var sig_3 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 0, { extension: target }).hex;
-                    hedgehog.state[ "channel_0" ].alices_offchain_tx_info.push({
+                    if ( am_alice ) {
+                        if ( amnt_for_alice ) tx1.vout.push( hedgehog.getVout( amnt_for_alice, alices_address ) );
+                        if ( amnt_for_bob ) tx1.vout.push( hedgehog.getVout( amnt_for_bob, bobs_address ) );
+                    } else {
+                        if ( amnt_for_alice ) tx1.vout.push( hedgehog.getVout( amnt_for_alice, alices_address ) );
+                        if ( amnt_for_bob ) tx1.vout.push( hedgehog.getVout( amnt_for_bob, bobs_address ) );
+                    }
+                    // console.log( "tx0:", JSON.stringify( tx0 ) );
+                    // console.log( "tx1:", JSON.stringify( tx1 ) );
+
+                    //Sign both of these transactions, but sign tx1 with a sig that
+                    //is only valid after a relative timelock of 2016 blocks expires.
+                    var tx0_script = hedgehog.state[ chan_id ].multisig_script;
+                    var tx0_target = tapscript.Tap.encodeScript( tx0_script );
+                    var tx0_tree = hedgehog.state[ chan_id ].multisig_tree;
+                    var tx1_script = latest_scripts[ 0 ];
+                    var tx1_target = tapscript.Tap.encodeScript( tx1_script );
+                    var tx1_tree = latest_scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                    var sig_1 = tapscript.Signer.taproot.sign( privkey, tx0, 0, { extension: tx0_target }).hex;
+                    //sig_3 is for tx1 and it has a relative timelock of 2016 blocks
+                    //because tx1's only input (see above) has sequence number 2016
+                    var sig_3 = tapscript.Signer.taproot.sign( privkey, tx1, 0, { extension: tx1_target }).hex;
+                    var sighash_3 = tapscript.Signer.taproot.hash( tx1, 0, { extension: tx1_target }).hex;
+
+                    //If necessary, create a revocation sig that conditionally revokes
+                    //the prior state
+                    var conditional_revocation_is_necessary = false;
+                    if ( am_alice && hedgehog.state[ chan_id ].alices_revocation_hashes.length ) conditional_revocation_is_necessary = true;
+                    if ( !am_alice && hedgehog.state[ chan_id ].bobs_revocation_hashes.length ) conditional_revocation_is_necessary = true;
+                    if ( conditional_revocation_is_necessary ) {
+                        if ( am_alice ) var prev_address = hedgehog.state[ chan_id ].alice_can_revoke[ hedgehog.state[ chan_id ].alice_can_revoke.length - 1 ][ 0 ];
+                        else var prev_address = hedgehog.state[ chan_id ].bob_can_revoke[ hedgehog.state[ chan_id ].bob_can_revoke.length - 1 ][ 0 ];
+                        if ( am_alice ) var prev_scripts = hedgehog.state[ chan_id ].alice_can_revoke[ hedgehog.state[ chan_id ].alice_can_revoke.length - 1 ][ 1 ];
+                        else var prev_scripts = hedgehog.state[ chan_id ].bob_can_revoke[ hedgehog.state[ chan_id ].bob_can_revoke.length - 1 ][ 1 ];
+                        var prev_tx0 = tapscript.Tx.create({
+                            vin: [hedgehog.getVin( utxo_info[ "txid" ], utxo_info[ "vout" ], original_amnt, hedgehog.state[ chan_id ][ "multisig" ] )],
+                            vout: [hedgehog.getVout( original_amnt - 500, prev_address )],
+                        });
+                        var prev_txid = tapscript.Tx.util.getTxid( prev_tx0 );
+                        var new_tx1 = tapscript.Tx.create({
+                            vin: [hedgehog.getVin( prev_txid, 0, original_amnt - 500, prev_address )],
+                            vout: [],
+                        });
+                        if ( am_alice ) {
+                            if ( amnt_for_alice ) new_tx1.vout.push( hedgehog.getVout( amnt_for_alice, alices_address ) );
+                            if ( amnt_for_bob ) new_tx1.vout.push( hedgehog.getVout( amnt_for_bob, bobs_address ) );
+                        } else {
+                            if ( amnt_for_alice ) new_tx1.vout.push( hedgehog.getVout( amnt_for_alice, alices_address ) );
+                            if ( amnt_for_bob ) new_tx1.vout.push( hedgehog.getVout( amnt_for_bob, bobs_address ) );
+                        }
+                        var new_tx1_script = prev_scripts[ 0 ];
+                        var new_tx1_target = tapscript.Tap.encodeScript( new_tx1_script );
+                        var new_tx1_tree = prev_scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                        var conditional_revocation_sig = tapscript.Signer.taproot.sign( privkey, new_tx1, 0, { extension: new_tx1_target }).hex;
+                    }
+
+                    //If necessary, prepare to reveal whichever preimage fully revokes
+                    //the state prior to the prior state (yes, doubly prior)
+                    var full_revocation_is_necessary = false;
+                    if ( am_alice && hedgehog.state[ chan_id ].alices_revocation_hashes.length > 1 ) full_revocation_is_necessary = true;
+                    if ( !am_alice && hedgehog.state[ chan_id ].bobs_revocation_hashes.length > 1 ) full_revocation_is_necessary = true;
+                    if ( full_revocation_is_necessary ) {
+                        if ( am_alice ) var full_revocation_preimage = hedgehog.state[ chan_id ].alices_revocation_preimages[ hedgehog.state[ chan_id ].alices_revocation_preimages.length - 2 ];
+                        else var full_revocation_preimage = hedgehog.state[ chan_id ].bobs_revocation_preimages[ hedgehog.state[ chan_id ].bobs_revocation_preimages.length - 2 ];
+                    }
+
+                    //Prepare a preimage/hash pair for the recipient to use in their
+                    //next state update
+                    var preimage = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
+                    var hash = hedgehog.rmd160( hedgehog.hexToBytes( preimage ) );
+                    if ( am_alice ) {
+                        hedgehog.state[ chan_id ].alices_revocation_preimages.push( preimage );
+                        hedgehog.state[ chan_id ].alices_revocation_hashes.push( hash );
+                    } else {
+                        hedgehog.state[ chan_id ].bobs_revocation_preimages.push( preimage );
+                        hedgehog.state[ chan_id ].bobs_revocation_hashes.push( hash );
+                    }
+                    //Create an object to send all this data to the recipient
+                    var object = {
                         sig_1,
-                        penalty_sig,
                         sig_3,
-                        amt_to_send,
-                        alices_revocation_hash,
-                        scripts,
-                        trees: [tree],
-                    });
-                    var tree = tree_2;
-                    if ( reveal_secret ) {
-                        if ( hedgehog.state[ "channel_0" ].alice_should_reveal ) hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "secret" ] = secret_to_reveal;
-                        else hedgehog.state[ "channel_0" ].alice_should_reveal = true;
-                        hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "force_close_sig_1" ] = force_close_sig_1;
-                        hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "force_close_sig_2" ] = force_close_sig_2;
+                        hash,
+                        amnt,
+                        chan_id,
                     }
-                    var temp = JSON.parse( JSON.stringify( hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ] ) );
-                    delete temp.scripts;
-                    delete temp.trees;
-                    console.log( JSON.stringify( temp ) );
-                    hedgehog.state[ "channel_0" ].balances_according_to_alice = [ hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] - amt_to_send, hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] + amt_to_send ];
-                    var msg = `Alice should now send Bob sig_1, sig_3, the amount she sent him, and a hash she wants him to use in his next payment to her. This info is in your console. Enter the command 'hedgehog.bob_receive()' in his browser console to simulate Bob accepting this payment.`;
-                    if ( initialization ) msg = `To initialize the channel, send Bob the info in your console`;
-                    alert( msg );
+                    if ( conditional_revocation_sig ) object[ "conditional_revocation_sig" ] = conditional_revocation_sig;
+                    if ( full_revocation_is_necessary ) object[ "full_revocation_preimage" ] = full_revocation_preimage;
+                    if ( opening ) object[ "utxo_info" ] = utxo_info;
+                    if ( opening ) object[ "sender_pubkey" ] = hedgehog.state[ chan_id ].bobs_pubkey;
+                    if ( opening ) object[ "recipient_pubkey" ] = hedgehog.state[ chan_id ].alices_pubkey;
+
+                    //update the balances
+                    hedgehog.state[ chan_id ].balances_before_most_recent_send = JSON.parse( JSON.stringify( hedgehog.state[ chan_id ].balances ) );
+                    if ( am_alice ) {
+                        hedgehog.state[ chan_id ].balances = [ balances[ 0 ] - amnt, balances[ 1 ] + amnt ];
+                        hedgehog.state[ chan_id ].balances_before_most_recent_receive = [ balances[ 0 ] - amnt, balances[ 1 ] + amnt ];
+                    } else {
+                        hedgehog.state[ chan_id ].balances = [ balances[ 0 ] + amnt, balances[ 1 ] - amnt ];
+                        hedgehog.state[ chan_id ].balances_before_most_recent_receive = [ balances[ 0 ] + amnt, balances[ 1 ] - amnt ];
+                    }
+
+                    //update state of who was last to send
+                    hedgehog.state[ chan_id ].i_was_last_to_send = true;
+
+                    return object;
                 },
-                bob_receive: async ( initialization ) => {
-                    var alices_info = JSON.parse( prompt( `Enter the info from Alice` ) );
-                    var msg = `Click ok to receive ${alices_info[ "amt_to_send" ]} sats from Alice`;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] + alices_info[ "amt_to_send" ] < 1330 ) msg += `. Note that this will only bring your balance up to ${hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] + alices_info[ "amt_to_send" ]} sats, which is less than 1330. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended`;
-                    var conf;
-                    if ( alices_info[ "amt_to_send" ] && typeof alices_info[ "amt_to_send" ] == "number" && alices_info[ "amt_to_send" ] > 0 && hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] - alices_info[ "amt_to_send" ] - 500 - 500 >= 0 && !initialization ) conf = confirm( msg );
-                    else conf = true;
-                    if ( !conf ) return;
-                    var zero_out_alices_balance;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] - alices_info[ "amt_to_send" ] - 500 - 500 < 330 ) zero_out_alices_balance = true;
-                    var zero_out_bobs_balance;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] + alices_info[ "amt_to_send" ] < 330 ) zero_out_bobs_balance = true;
-                    hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.push( alices_info );
-                    hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "received" ] = true;
-                    var txid = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "txid" ];
-                    var vout = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "vout" ];
-                    var amnt = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "amnt" ];
-                    if ( hedgehog.state[ "channel_0" ].alice_should_reveal ) var alices_previous_revocation_hash = hedgehog.state[ "channel_0" ].alices_revocation_hashes[ hedgehog.state[ "channel_0" ].alices_revocation_hashes.length - 2 ];
-                    else var alices_previous_revocation_hash;
-                    var alices_revocation_hash = hedgehog.state[ "channel_0" ].alices_revocation_hashes[ hedgehog.state[ "channel_0" ].alices_revocation_hashes.length - 1 ];
-                    var bobs_revocation_hash = hedgehog.state[ "channel_0" ].bobs_revocation_hashes[ hedgehog.state[ "channel_0" ].bobs_revocation_hashes.length - 1 ];
-                    var scripts = hedgehog.bobs_revocation_script( bobs_revocation_hash );
-                    var revocable = hedgehog.makeAddress( scripts );
-                    var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
-                    hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "scripts" ] = scripts;
-                    hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "trees" ] = [tree];
-                    var txdata = tapscript.Tx.create({
-                        vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                        vout: [
-                            hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                            hedgehog.getVout( 330, revocable ),
-                        ],
+                receive: async data => {
+                    var data_was_here_originally = data;
+                    if ( !data ) data = JSON.parse( prompt( `Enter the data from your counterparty` ) );
+                    var chan_id = data[ "chan_id" ];
+
+                    //automatically find out if I am Alice or Bob using the chan_id
+                    var am_alice = !!hedgehog.state[ chan_id ].alices_privkey;
+
+                    //if I recently received, restore the state to what it was before
+                    //I last received so I can overwrite my previous state update
+                    //but keep a copy of the old state so that, if the new state is
+                    //invalid, I can restore the old state
+                    if ( !hedgehog.state[ chan_id ].i_was_last_to_send ) {
+                        var current_balances = JSON.parse( JSON.stringify( hedgehog.state[ chan_id ].balances ) );
+                        hedgehog.state[ chan_id ].balances = hedgehog.state[ chan_id ].balances_before_most_recent_receive;
+                        if ( !hedgehog.state[ chan_id ].balances.length ) {
+                            var sum = current_balances[ 0 ] + current_balances[ 1 ];
+                            if ( am_alice ) hedgehog.state[ chan_id ].balances = [ 0, sum ];
+                            else hedgehog.state[ chan_id ].balances = [ sum, 0 ];
+                        }
+                        if ( am_alice ) {
+                            var old_rev_hashes = hedgehog.state[ chan_id ].bobs_revocation_hashes.pop();
+                            var other_rev_info = hedgehog.state[ chan_id ].alice_can_revoke.pop();
+                        } else {
+                            var old_rev_hashes = hedgehog.state[ chan_id ].alices_revocation_hashes.pop();
+                            var other_rev_info = hedgehog.state[ chan_id ].bob_can_revoke.pop();
+                        }
+                    }
+
+                    //push your counterparty's payment hash to their hashes object
+                    if ( am_alice ) hedgehog.state[ chan_id ].bobs_revocation_hashes.push( data[ "hash" ] );
+                    else hedgehog.state[ chan_id ].alices_revocation_hashes.push( data[ "hash" ] );
+
+                    //create the revocation scripts so the recipient can revoke this state later
+                    if ( am_alice ) {
+                        var latest_scripts = hedgehog.makeAlicesRevocationScript( chan_id );
+                        var revocable_address = hedgehog.makeAddress( chan_id, latest_scripts );
+                        hedgehog.state[ chan_id ].alice_can_revoke.push( [ revocable_address, latest_scripts ] );
+                    } else {
+                        var latest_scripts = hedgehog.makeBobsRevocationScript( chan_id );
+                        var revocable_address = hedgehog.makeAddress( chan_id, latest_scripts );
+                        hedgehog.state[ chan_id ].bob_can_revoke.push( [ revocable_address, latest_scripts ] );
+                    }
+
+                    //create tx0 to send all the money from the multisig into alice_can_revoke
+                    //or bob_can_revoke (depending on who is sending)
+                    var utxo_info = hedgehog.state[ chan_id ].multisig_utxo_info;
+                    var amnt = data[ "amnt" ];
+                    var balances = hedgehog.state[ chan_id ].balances;
+                    var alices_address = hedgehog.state[ chan_id ].alices_address;
+                    var bobs_address = hedgehog.state[ chan_id ].bobs_address;
+                    var original_amnt = balances[ 0 ] + balances[ 1 ];
+                    var tx0 = tapscript.Tx.create({
+                        vin: [hedgehog.getVin( utxo_info[ "txid" ], utxo_info[ "vout" ], original_amnt, hedgehog.state[ chan_id ][ "multisig" ] )],
+                        vout: [hedgehog.getVout( original_amnt - 500, revocable_address )],
                     });
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 0 ][ 0 ] );
-                    var tree = hedgehog.state[ "channel_0" ].trees[ 0 ];
-                    var sig_1 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "sig_1" ];
-                    var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: target }).hex;
-                    var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_1, sighash, hedgehog.state[ "channel_0" ].alices_pubkey );
-                    if ( !sig_is_valid ) {
-                        alert( `nevermind, sig_1 was invalid` );
-                        return hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1, 1 );
+                    var tx0_id = tapscript.Tx.util.getTxid( tx0 );
+
+                    //create tx1 to distribute the funds however the sender wishes to do so
+                    var tx1 = tapscript.Tx.create({
+                        //TODO: change the sequence number (relative timelock) from 5 to 2016
+                        vin: [hedgehog.getVin( tx0_id, 0, original_amnt - 500, revocable_address, 5 )],
+                        vout: [],
+                    });
+
+                    //increase the recipient's balance by amnt and decrease the sender's by
+                    //amnt and two mining fees
+                    if ( am_alice ) {
+                        var amnt_for_alice = balances[ 0 ] + amnt;
+                        var amnt_for_bob = balances[ 1 ] - amnt - 500 - 500;
+                        if ( data_was_here_originally ) var amnt_for_bob = 0;
+                    } else {
+                        var amnt_for_alice = balances[ 0 ] - amnt - 500 - 500;
+                        var amnt_for_bob = balances[ 1 ] + amnt;
                     }
-                    var sig_2 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 0, { extension: target }).hex;
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
-                    txdata.vin[ 0 ].witness = [ sig_2, sig_1, hedgehog.state[ "channel_0" ].scripts[ 0 ][ 0 ], cblock ];
-                    var txhex = tapscript.Tx.encode( txdata ).hex;
-                    var offchain_txid = tapscript.Tx.util.getTxid( txdata );
-                    var alice_must_reveal_secret = false;
-                    if ( hedgehog.find_latest_time_i_sent( "bob" ) > -1 ) alice_must_reveal_secret = true;
-                    var amt_to_send = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "amt_to_send" ];
-                    {
-                        var to_bob = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ "channel_0" ].bobs_pubkey ] );
-                        var alt_revocable_scripts = hedgehog.alices_revocation_script( alices_revocation_hash );
-                        var alt_revocable = hedgehog.makeAddress( alt_revocable_scripts );
-                        var alt_target = tapscript.Tap.encodeScript( alt_revocable_scripts[ 1 ] );
-                        var txdata = tapscript.Tx.create({
-                            vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                            vout: [
-                                hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                                hedgehog.getVout( 330, alt_revocable ),
-                            ],
-                        });
-                        var alt_txid = tapscript.Tx.util.getTxid( txdata );
-                        var txdata = tapscript.Tx.create({
-                            vin: [
-                                hedgehog.getVin( alt_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                                hedgehog.getVin( alt_txid, 1, 330, alt_revocable ),
-                            ],
-                            vout: [hedgehog.getVout( amnt - 330 - 500, to_bob )],
-                        });
-                        var penalty_target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 2 ][ 0 ] );
-                        var penalty_sig = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "penalty_sig" ];
-                        var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: penalty_target }).hex;
-                        var sig_is_valid = await nobleSecp256k1.schnorr.verify( penalty_sig, sighash, hedgehog.state[ "channel_0" ].alices_pubkey );
-                        if ( !sig_is_valid ) {
-                            alert( `nevermind, the penalty_sig was invalid` );
-                            return hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1, 1 );
+                    if ( am_alice ) {
+                        if ( amnt_for_alice ) tx1.vout.push( hedgehog.getVout( amnt_for_alice, alices_address ) );
+                        if ( amnt_for_bob ) tx1.vout.push( hedgehog.getVout( amnt_for_bob, bobs_address ) );
+                    } else {
+                        if ( amnt_for_alice ) tx1.vout.push( hedgehog.getVout( amnt_for_alice, alices_address ) );
+                        if ( amnt_for_bob ) tx1.vout.push( hedgehog.getVout( amnt_for_bob, bobs_address ) );
+                    }
+                    // console.log( "tx0:", JSON.stringify( tx0 ) );
+                    // console.log( "tx1:", JSON.stringify( tx1 ) );
+
+                    //validate the signatures by which the sender creates the new state
+                    if ( am_alice ) var pubkey_to_validate_against = hedgehog.state[ chan_id ].bobs_pubkey;
+                    else var pubkey_to_validate_against = hedgehog.state[ chan_id ].alices_pubkey;
+                    var tx0_script = hedgehog.state[ chan_id ].multisig_script;
+                    var tx0_target = tapscript.Tap.encodeScript( tx0_script );
+                    var tx0_tree = hedgehog.state[ chan_id ].multisig_tree;
+                    var tx1_script = latest_scripts[ 0 ];
+                    var tx1_target = tapscript.Tap.encodeScript( tx1_script );
+                    var tx1_tree = latest_scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                    var sig_1 = data[ "sig_1" ];
+                    var sighash_1 = tapscript.Signer.taproot.hash( tx0, 0, { extension: tx0_target }).hex;
+                    var is_valid_1 = await nobleSecp256k1.schnorr.verify( sig_1, sighash_1, pubkey_to_validate_against );
+                    var sig_3 = data[ "sig_3" ];
+                    var sighash_3 = tapscript.Signer.taproot.hash( tx1, 0, { extension: tx1_target }).hex;
+                    var is_valid_3 = await nobleSecp256k1.schnorr.verify( sig_3, sighash_3, pubkey_to_validate_against );
+                    if ( !is_valid_1 || !is_valid_3 ) {
+                        //restore old state and inform user this state update was invalid
+                        if ( am_alice ) {
+                            hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
+                            hedgehog.state[ chan_id ].alice_can_revoke.push( other_rev_info );
+                        } else {
+                            hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
+                            hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
                         }
-                        var penalty_sig_2 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 0, { extension: penalty_target }).hex;
-                        var penalty_sig_3 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 1, { extension: alt_target }).hex;
-                        if ( alice_must_reveal_secret ) {
-                            var txdata = tapscript.Tx.create({
-                                vin: [
-                                    hedgehog.getVin( alt_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                                    hedgehog.getVin( alt_txid, 1, 330, alt_revocable ),
-                                ],
-                                vout: [
-                                    hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] - amt_to_send - 500 - 500, hedgehog.state[ "channel_0" ].alices_address ),
-                                    hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] + amt_to_send, hedgehog.state[ "channel_0" ].bobs_address ),
-                                ],
-                            });
-                            var force_close_sig_1 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "force_close_sig_1" ];
-                            var force_close_sig_2 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "force_close_sig_2" ];
-                            var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: penalty_target }).hex;
-                            var sig_is_valid = await nobleSecp256k1.schnorr.verify( force_close_sig_1, sighash, hedgehog.state[ "channel_0" ].alices_pubkey );
-                            if ( !sig_is_valid ) {
-                                alert( `nevermind, force_close_sig_1 was invalid` );
-                                return hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1, 1 );
+                        return alert( `Your counterparty sent you invalid main-sig data so it will be ignored` );
+                    }
+
+                    //Sign both of these transactions, but sign tx1 with a sig that
+                    //is only valid after a relative timelock of 2016 blocks expires.
+                    if ( am_alice ) var privkey = hedgehog.state[ chan_id ].alices_privkey;
+                    else var privkey = hedgehog.state[ chan_id ].bobs_privkey;
+                    var sig_2 = tapscript.Signer.taproot.sign( privkey, tx0, 0, { extension: tx0_target }).hex;
+                    var sig_4 = tapscript.Signer.taproot.sign( privkey, tx1, 0, { extension: tx1_target }).hex;
+
+                    //If necessary, validate the signature by which the sender
+                    //conditionally revokes the old state and cosign the revocation
+                    var conditional_revocation_is_necessary = false;
+                    if ( am_alice && hedgehog.state[ chan_id ].bobs_revocation_hashes.length > 1 ) conditional_revocation_is_necessary = true;
+                    if ( !am_alice && hedgehog.state[ chan_id ].alices_revocation_hashes.length > 1 ) conditional_revocation_is_necessary = true;
+                    if ( conditional_revocation_is_necessary ) {
+                        if ( !( "conditional_revocation_sig" in data ) ) {
+                            //restore old state and inform user this state update was invalid
+                            if ( am_alice ) {
+                                hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
+                                hedgehog.state[ chan_id ].alice_can_revoke.push( other_rev_info );
+                            } else {
+                                hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
+                                hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
                             }
-                            var penalty_target_2 = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ hedgehog.state[ "channel_0" ].scripts.length - 1 ][ 2 ] );
-                            var sighash = tapscript.Signer.taproot.hash( txdata, 1, { extension: penalty_target_2 }).hex;
-                            var sig_is_valid = await nobleSecp256k1.schnorr.verify( force_close_sig_2, sighash, hedgehog.state[ "channel_0" ].alices_pubkey );
-                            if ( !sig_is_valid ) {
-                                alert( `nevermind, force_close_sig_2 was invalid` );
-                                return hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1, 1 );
+                            return alert( `Your counterparty sent you invalid cond-sig data (no cond sig) so it will be ignored` );
+                        }
+                        //TODO: ensure checking this sig doesn't crash the app
+                        if ( am_alice ) var prev_address = hedgehog.state[ chan_id ].bob_can_revoke[ hedgehog.state[ chan_id ].bob_can_revoke.length - 1 ][ 0 ];
+                        else var prev_address = hedgehog.state[ chan_id ].alice_can_revoke[ hedgehog.state[ chan_id ].alice_can_revoke.length - 1 ][ 0 ];
+                        if ( am_alice ) var prev_scripts = hedgehog.state[ chan_id ].bob_can_revoke[ hedgehog.state[ chan_id ].bob_can_revoke.length - 1 ][ 1 ];
+                        else var prev_scripts = hedgehog.state[ chan_id ].alice_can_revoke[ hedgehog.state[ chan_id ].alice_can_revoke.length - 1 ][ 1 ];
+                        var prev_tx0 = tapscript.Tx.create({
+                            vin: [hedgehog.getVin( utxo_info[ "txid" ], utxo_info[ "vout" ], original_amnt, hedgehog.state[ chan_id ][ "multisig" ] )],
+                            vout: [hedgehog.getVout( original_amnt - 500, prev_address )],
+                        });
+                        var prev_txid = tapscript.Tx.util.getTxid( prev_tx0 );
+                        var new_tx1 = tapscript.Tx.create({
+                            vin: [hedgehog.getVin( prev_txid, 0, original_amnt - 500, prev_address )],
+                            vout: [],
+                        });
+                        if ( am_alice ) {
+                            if ( amnt_for_alice ) new_tx1.vout.push( hedgehog.getVout( amnt_for_alice, alices_address ) );
+                            if ( amnt_for_bob ) new_tx1.vout.push( hedgehog.getVout( amnt_for_bob, bobs_address ) );
+                        } else {
+                            if ( amnt_for_alice ) new_tx1.vout.push( hedgehog.getVout( amnt_for_alice, alices_address ) );
+                            if ( amnt_for_bob ) new_tx1.vout.push( hedgehog.getVout( amnt_for_bob, bobs_address ) );
+                        }
+                        var new_tx1_script = prev_scripts[ 0 ];
+                        var new_tx1_target = tapscript.Tap.encodeScript( new_tx1_script );
+                        var new_tx1_tree = prev_scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                        var conditional_revocation_sig = data[ "conditional_revocation_sig" ];
+                        var conditional_sighash = tapscript.Signer.taproot.hash( new_tx1, 0, { extension: new_tx1_target }).hex;
+                        var conditional_is_valid = await nobleSecp256k1.schnorr.verify( conditional_revocation_sig, conditional_sighash, pubkey_to_validate_against );
+                        if ( !conditional_is_valid ) {
+                            //restore old state and inform user this state update was invalid
+                            if ( am_alice ) {
+                                hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
+                                hedgehog.state[ chan_id ].alice_can_revoke.push( other_rev_info );
+                            } else {
+                                hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
+                                hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
                             }
-                            var force_close_sig_3 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 0, { extension: penalty_target }).hex;
-                            var force_close_sig_4 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 1, { extension: penalty_target_2 }).hex;
+                            return alert( `Your counterparty sent you invalid cond-sig data (invalid sig) so it will be ignored` );
                         }
-                        var latest_time_i_sent = hedgehog.find_latest_time_i_sent( "bob" );
-                        if ( latest_time_i_sent > -1 ) {
-                            hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig" ] = penalty_sig;
-                            hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig_2" ] = penalty_sig_2;
-                            hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig_3" ] = penalty_sig_3;
-                            if ( alice_must_reveal_secret ) hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_1" ] = force_close_sig_1;
-                            if ( alice_must_reveal_secret ) hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_2" ] = force_close_sig_2;
-                            if ( alice_must_reveal_secret ) hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_3" ] = force_close_sig_3;
-                            if ( alice_must_reveal_secret ) hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_4" ] = force_close_sig_4;
+                        var conditional_cosignature = tapscript.Signer.taproot.sign( privkey, new_tx1, 0, { extension: new_tx1_target }).hex;
+                    }
+
+                    //If necessary, validate the preimage by which the sender
+                    //fully revokes the old state and sign the revocation
+                    var full_revocation_is_necessary = false;
+                    if ( am_alice && hedgehog.state[ chan_id ].bobs_revocation_hashes.length > 2 ) full_revocation_is_necessary = true;
+                    if ( !am_alice && hedgehog.state[ chan_id ].alices_revocation_hashes.length > 2 ) full_revocation_is_necessary = true;
+                    if ( full_revocation_is_necessary ) {
+                        if ( !( "full_revocation_preimage" in data ) ) {
+                            //restore old state and inform user this state update was invalid
+                            if ( am_alice ) {
+                                hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
+                                hedgehog.state[ chan_id ].alice_can_revoke.push( other_rev_info );
+                            } else {
+                                hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
+                                hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
+                            }
+                            return alert( `Your counterparty sent you invalid full-rev data (no pmg) so it will be ignored` );
+                        }
+                        //TODO: ensure checking this sig doesn't crash the app
+                        if ( am_alice ) var prev_address = hedgehog.state[ chan_id ].bob_can_revoke[ hedgehog.state[ chan_id ].bob_can_revoke.length - 2 ][ 0 ];
+                        else var prev_address = hedgehog.state[ chan_id ].alice_can_revoke[ hedgehog.state[ chan_id ].alice_can_revoke.length - 2 ][ 0 ];
+                        if ( am_alice ) var prev_scripts = hedgehog.state[ chan_id ].bob_can_revoke[ hedgehog.state[ chan_id ].bob_can_revoke.length - 2 ][ 1 ];
+                        else var prev_scripts = hedgehog.state[ chan_id ].alice_can_revoke[ hedgehog.state[ chan_id ].alice_can_revoke.length - 2 ][ 1 ];
+                        var preimage = data[ "full_revocation_preimage" ];
+                        var expected_hash = prev_scripts[ 1 ][ 1 ];
+                        var hash_provided = hedgehog.rmd160( hedgehog.hexToBytes( preimage ) );
+                        if ( hash_provided != expected_hash ) {
+                            //restore old state and inform user this state update was invalid
+                            if ( am_alice ) {
+                                hedgehog.state[ chan_id ].bobs_revocation_hashes.push( old_rev_hashes );
+                                hedgehog.state[ chan_id ].alice_can_revoke.push( other_rev_info );
+                            } else {
+                                hedgehog.state[ chan_id ].alices_revocation_hashes.push( old_rev_hashes );
+                                hedgehog.state[ chan_id ].bob_can_revoke.push( other_rev_info );
+                            }
+                            return alert( `Your counterparty sent you invalid full-rev data (wrg pmg) so it will be ignored` );
+                        }
+                        var prev_tx0 = tapscript.Tx.create({
+                            vin: [hedgehog.getVin( utxo_info[ "txid" ], utxo_info[ "vout" ], original_amnt, hedgehog.state[ chan_id ][ "multisig" ] )],
+                            vout: [hedgehog.getVout( original_amnt - 500, prev_address )],
+                        });
+                        var doubly_prev_txid = tapscript.Tx.util.getTxid( prev_tx0 );
+                        if ( am_alice ) var my_address = alices_address;
+                        else var my_address = bobs_address;
+                        var tx2 = tapscript.Tx.create({
+                            vin: [hedgehog.getVin( doubly_prev_txid, 0, original_amnt - 500, prev_address )],
+                            vout: [hedgehog.getVout( original_amnt - 500 - 500, my_address )],
+                        });
+                        var tx2_script = prev_scripts[ 1 ];
+                        var tx2_target = tapscript.Tap.encodeScript( tx2_script );
+                        var tx2_tree = prev_scripts.map( s => tapscript.Tap.encodeScript( s ) );
+                        var full_revocation_sig = tapscript.Signer.taproot.sign( privkey, tx2, 0, { extension: tx2_target }).hex;
+                    }
+
+                    //prepare and save the force closure initiation transaction
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tx0_tree, target: tx0_target });
+                    //the order of the pubkeys is Alice first, then Bob, so -- if I am alice --
+                    //the first sig must be sig_2 -- which means it must be in the "last"
+                    //position (i.e. the sig created by Alice must appear right before her pubkey)
+                    if ( am_alice ) tx0.vin[ 0 ].witness = [ sig_1, sig_2, tx0_script, cblock ];
+                    else tx0.vin[ 0 ].witness = [ sig_2, sig_1, tx0_script, cblock ];
+
+                    //prepare the force closure finalization transaction
+                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tx1_tree, target: tx1_target });
+                    if ( am_alice ) tx1.vin[ 0 ].witness = [ sig_3, sig_4, tx1_script, cblock ];
+                    else tx1.vin[ 0 ].witness = [ sig_4, sig_3, tx1_script, cblock ];
+
+                    //if necessary, prepare and save the conditional revocation transaction
+                    if ( conditional_revocation_is_necessary ) {
+                        var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: new_tx1_tree, target: new_tx1_target });
+                        if ( am_alice ) new_tx1.vin[ 0 ].witness = [ conditional_revocation_sig, conditional_cosignature, new_tx1_script, cblock ];
+                        else new_tx1.vin[ 0 ].witness = [ conditional_cosignature, conditional_revocation_sig, tx1_script, cblock ];
+                    }
+
+                    //if necessary, prepare and save the conditional revocation transaction
+                    if ( full_revocation_is_necessary ) {
+                        var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tx2_tree, target: tx2_target });
+                        tx2.vin[ 0 ].witness = [ full_revocation_sig, preimage, tx2_script, cblock ];
+                    }
+
+                    //save the transactions
+                    hedgehog.state[ chan_id ].latest_force_close_txs = [
+                        tapscript.Tx.encode( tx0 ).hex,
+                        tapscript.Tx.encode( tx1 ).hex,
+                    ];
+                    if ( conditional_revocation_is_necessary ) {
+                        hedgehog.state[ chan_id ].txids_to_watch_for[ prev_txid ] = {
+                            conditional_revocation_tx: tapscript.Tx.encode( new_tx1 ).hex,
                         }
                     }
-                    if ( ( alice_must_reveal_secret && hedgehog.state[ "channel_0" ].alice_should_reveal && !alices_info[ "secret" ] ) || ( alice_must_reveal_secret && alices_info[ "secret" ] && hedgehog.rmd160( hedgehog.hexToBytes( alices_info[ "secret" ] ) ) != alices_previous_revocation_hash ) ) {
-                        alert( `nevermind, Alice didn't reveal her secret` );
-                        return hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1, 1 );
+                    if ( full_revocation_is_necessary ) hedgehog.state[ chan_id ].txids_to_watch_for[ doubly_prev_txid ][ "full_revocation_tx" ] = tapscript.Tx.encode( tx2 ).hex;
+
+                    //update the balances
+                    if ( am_alice ) {
+                        hedgehog.state[ chan_id ].balances = [ balances[ 0 ] + amnt, balances[ 1 ] - amnt ];
+                    } else {
+                        hedgehog.state[ chan_id ].balances = [ balances[ 0 ] - amnt, balances[ 1 ] + amnt ];
                     }
-                    if ( alice_must_reveal_secret ) {
-                        var past_scripts = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.find_latest_time_i_sent( "bob" ) ][ "scripts" ];
-                        var past_revocable = hedgehog.makeAddress( past_scripts );
-                        var past_tx = {
-                            vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                            vout: [
-                                hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                                hedgehog.getVout( 330, past_revocable ),
-                            ],
-                        }
-                        var past_txdata = tapscript.Tx.create( past_tx );
-                        var past_txid = tapscript.Tx.util.getTxid( past_txdata );
-                        var prev_txid = hedgehog.state[ "channel_0" ].txids_bob_watches_for[ "order" ][ hedgehog.state[ "channel_0" ].txids_bob_watches_for[ "order" ].length - 1 ];
-                        if ( "secret" in alices_info && hedgehog.state[ "channel_0" ].alice_should_reveal ) hedgehog.state[ "channel_0" ].txids_bob_watches_for[ prev_txid ][ "secret" ] = alices_info[ "secret" ];
-                        if ( !hedgehog.state[ "channel_0" ].alice_should_reveal && alice_must_reveal_secret ) hedgehog.state[ "channel_0" ].alice_should_reveal = true;
-                        hedgehog.state[ "channel_0" ].txids_bob_watches_for[ "order" ].push( past_txid );
-                        hedgehog.state[ "channel_0" ].txids_bob_watches_for[ past_txid ] = {
-                            secret: "",
-                            past_tx,
-                            index_of_tx_info_containing_recovery_scripts: hedgehog.find_latest_time_i_sent( "bob" ),
-                        }
-                        hedgehog.state[ "channel_0" ].alices_revocation_hashes.push( alices_info[ "alices_revocation_hash" ] );
-                    }
-                    var prep_tx = {
-                        vin: [
-                            hedgehog.getVin( offchain_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                            //TODO: change the 5 to a 2016
-                            hedgehog.getVin( offchain_txid, 1, 330, revocable, 5 ),
-                        ],
-                        vout: [
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] - amt_to_send - 500 - 500, hedgehog.state[ "channel_0" ].alices_address ),
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] + amt_to_send, hedgehog.state[ "channel_0" ].bobs_address ),
-                        ],
-                    }
-                    if ( zero_out_alices_balance ) prep_tx[ "vout" ].splice( 0, 1 );
-                    if ( zero_out_bobs_balance ) prep_tx[ "vout" ].splice( 1, 1 );
-                    var txdata = tapscript.Tx.create( prep_tx );
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 1 ][ 0 ] );
-                    var tree = hedgehog.state[ "channel_0" ].trees[ 1 ];
-                    var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
-                    var sig_3 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "sig_3" ];
-                    var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: target }).hex;
-                    var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_3, sighash, hedgehog.state[ "channel_0" ].alices_pubkey );
-                    if ( !sig_is_valid ) {
-                        alert( `nevermind, sig_3 was invalid` );
-                        return hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1, 1 );
-                    }
-                    var sig_4 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 0, { extension: target }).hex;
-                    txdata.vin[ 0 ].witness = [ sig_4, sig_3, hedgehog.state[ "channel_0" ].scripts[ 0 ][ 0 ], cblock ];
-                    //TODO: fix this part -- the script will be #1 the first time
-                    //you send but after that I think it depends on who is sending
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "scripts" ][ 0 ] );
-                    var tree = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "trees" ][ 0 ];
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
-                    var sig_5 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 1, { extension: target }).hex;
-                    //the script is supposed to come from the ones I made when I ran makeAddress to make the revocable address.
-                    //So I used to say here to get the script from hedgehog.state[ "channel_0" ].scripts[ hedgehog.state[ "channel_0" ].scripts.length - 1 ][ 0 ]. But now
-                    //I call makeAddress 1 or 2 times after that, depending on whether Alice reveals her secret or not.
-                    //So I define an offset of 2 and if Alice revealed her secret then I increment it by 1, then get the
-                    //script from there
-                    var offset = 2;
-                    if ( alice_must_reveal_secret ) offset = offset + 1;
-                    txdata.vin[ 1 ].witness = [ sig_5, hedgehog.state[ "channel_0" ].scripts[ hedgehog.state[ "channel_0" ].scripts.length - offset ][ 0 ], cblock ];
-                    hedgehog.state[ "channel_0" ].balances_according_to_bob = [ hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] - amt_to_send, hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] + amt_to_send ];
-                    hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "tx1" ] = txhex;
-                    var txhex = tapscript.Tx.encode( txdata ).hex;
-                    hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "tx2" ] = txhex;
-                    if ( !initialization ) alert( `Enter the command 'hedgehog.bob_close()' in your browser console to close the channel with this state:\n\nAlice: ${hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ]} sats\nBob: ${hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ]} sats` );
+
+                    //update state of who was last to send
+                    hedgehog.state[ chan_id ].i_was_last_to_send = false;
+
+                    return true;
                 },
-                bob_close: () => {
-                    console.log( `broadcast this:` );
-                    console.log( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.find_latest_time_i_received( "bob" ) ][ "tx1" ] );
+                closeChannel: chan_id => {
+                    console.log( "Broadcast this transaction to initiate a force closure:" );
+                    console.log( hedgehog.state[ chan_id ].latest_force_close_txs[ 0 ] );
                     //TODO: change the 5 to a 2016
-                    console.log( `broadcast this after 5 blocks:` );
-                    console.log( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.find_latest_time_i_received( "bob" ) ][ "tx2" ] );
-                },
-                bob_send: ( amt_to_send, initialization ) => {
-                    if ( !amt_to_send ) amt_to_send = Number( prompt( `This is the current state of the channel:\n\nAlice: ${hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ]} sats\nBob: ${hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ]} sats\n\nEnter an amount you want Bob to send to Alice` ) );
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500 < 0 ) return alert( `you cannot send this amount, your remaining balance will be negative (accounting for 1000 sats in fees)! Send a smaller amount` );
-                    var conf;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500 < 1330 && !initialization ) conf = confirm( `if you send this amount your remaining balance will be less than 1300 sats. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended. Click cancel to cancel or click ok to proceed` );
-                    else conf = true;
-                    if ( !conf ) return;
-                    var zero_out_alices_balance;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] + amt_to_send < 330 ) zero_out_alices_balance = true;
-                    var zero_out_bobs_balance;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500 < 330 ) zero_out_bobs_balance = true;
-                    var txid = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "txid" ];
-                    var vout = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "vout" ];
-                    var amnt = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "amnt" ];
-                    var reveal_secret = false;
-                    var alices_revocation_hash = hedgehog.state[ "channel_0" ].alices_revocation_hashes[ hedgehog.state[ "channel_0" ].alices_revocation_hashes.length - 1 ];
-                    var bobs_revocation_hash = hedgehog.state[ "channel_0" ].bobs_revocation_hashes[ hedgehog.state[ "channel_0" ].bobs_revocation_hashes.length - 1 ];
-                    //a user does not need to reveal their secret if they haven't received any money
-                    //because revealing their secret revokes their ability to safely receive money
-                    //in a given state, and if they haven't received money in the current state,
-                    //they should not revoke their ability to do so.
-                    if ( hedgehog.find_latest_time_i_received( "bob" ) > -1 ) reveal_secret = true;
-                    if ( reveal_secret ) {
-                        var secret_to_reveal = hedgehog.state[ "channel_0" ].bobs_revocation_preimages[ hedgehog.state[ "channel_0" ].bobs_revocation_preimages.length - 2 ];
-                        var bobs_new_secret = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
-                        bobs_revocation_hash = hedgehog.rmd160( hedgehog.hexToBytes( bobs_new_secret ) );
-                        hedgehog.state[ "channel_0" ].bobs_revocation_preimages.push( bobs_new_secret );
-                        hedgehog.state[ "channel_0" ].bobs_revocation_hashes.push( bobs_revocation_hash );
-                    }
-                    var scripts = hedgehog.alices_revocation_script( alices_revocation_hash );
-                    var revocable = hedgehog.makeAddress( scripts );
-                    var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
-                    var txdata = tapscript.Tx.create({
-                        vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                        vout: [
-                            hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                            hedgehog.getVout( 330, revocable ),
-                        ],
-                    });
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 0 ][ 0 ] );
-                    var sig_1 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 0, { extension: target }).hex;
-                    var offchain_txid = tapscript.Tx.util.getTxid( txdata );
-                    {
-                        var to_alice = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ "channel_0" ].alices_pubkey ] );
-                        var bobs_alt_hash = reveal_secret ? hedgehog.state[ "channel_0" ].bobs_revocation_hashes[ hedgehog.state[ "channel_0" ].bobs_revocation_hashes.length - 2 ] : bobs_revocation_hash;
-                        var alt_revocable_scripts = hedgehog.bobs_revocation_script( bobs_alt_hash );
-                        var alt_revocable = hedgehog.makeAddress( alt_revocable_scripts );
-                        var txdata = tapscript.Tx.create({
-                            vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                            vout: [
-                                hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                                hedgehog.getVout( 330, alt_revocable ),
-                            ],
-                        });
-                        var alt_txid = tapscript.Tx.util.getTxid( txdata );
-                        var txdata = tapscript.Tx.create({
-                            vin: [
-                                hedgehog.getVin( alt_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                                hedgehog.getVin( alt_txid, 1, 330, alt_revocable ),
-                            ],
-                            vout: [hedgehog.getVout( amnt - 330 - 500, to_alice )],
-                        });
-                        var penalty_target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 1 ][ 0 ] );
-                        var penalty_sig = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 0, { extension: penalty_target }).hex;
-                        var txdata = tapscript.Tx.create({
-                            vin: [
-                                hedgehog.getVin( alt_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                                hedgehog.getVin( alt_txid, 1, 330, alt_revocable ),
-                            ],
-                            vout: [
-                                hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] + amt_to_send, hedgehog.state[ "channel_0" ].alices_address ),
-                                hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500, hedgehog.state[ "channel_0" ].bobs_address ),
-                            ],
-                        });
-                        var force_close_sig_1 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 0, { extension: penalty_target }).hex;
-                        var penalty_target_2 = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ hedgehog.state[ "channel_0" ].scripts.length - 1 ][ 2 ] );
-                        var force_close_sig_2 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 1, { extension: penalty_target_2 }).hex;
-                    }
-                    var prep_tx = {
-                        vin: [
-                            hedgehog.getVin( offchain_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                            //TODO: change the 5 to a 2016
-                            hedgehog.getVin( offchain_txid, 1, 330, revocable, 5 ),
-                        ],
-                        vout: [
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] + amt_to_send, hedgehog.state[ "channel_0" ].alices_address ),
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] - amt_to_send - 500 - 500, hedgehog.state[ "channel_0" ].bobs_address ),
-                        ],
-                    }
-                    if ( zero_out_alices_balance ) prep_tx[ "vout" ].splice( 0, 1 );
-                    if ( zero_out_bobs_balance ) prep_tx[ "vout" ].splice( 1, 1 );
-                    var txdata = tapscript.Tx.create( prep_tx );
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 2 ][ 0 ] );
-                    var tree_2 = hedgehog.state[ "channel_0" ].trees[ 2 ];
-                    var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tree_2, target });
-                    var sig_3 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].bobs_privkey, txdata, 0, { extension: target }).hex;
-                    hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.push({
-                        sig_1,
-                        penalty_sig,
-                        sig_3,
-                        amt_to_send,
-                        bobs_revocation_hash,
-                        scripts,
-                        trees: [tree],
-                    });
-                    var tree = tree_2;
-                    if ( reveal_secret ) {
-                        if ( hedgehog.state[ "channel_0" ].bob_should_reveal ) hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "secret" ] = secret_to_reveal;
-                        else hedgehog.state[ "channel_0" ].bob_should_reveal = true;
-                        hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "force_close_sig_1" ] = force_close_sig_1;
-                        hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ][ "force_close_sig_2" ] = force_close_sig_2;
-                    }
-                    var temp = JSON.parse( JSON.stringify( hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ hedgehog.state[ "channel_0" ].bobs_offchain_tx_info.length - 1 ] ) );
-                    delete temp.scripts;
-                    delete temp.trees;
-                    console.log( JSON.stringify( temp ) );
-                    hedgehog.state[ "channel_0" ].balances_according_to_bob = [ hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] + amt_to_send, hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ] - amt_to_send ];
-                    var msg = `Bob should now send Alice sig_1, sig_3, the amount he sent her, and a hash he wants her to use in her next payment to him. This info is in your console. Enter the command 'hedgehog.alice_receive()' in her browser console to simulate Alice accepting this payment.`;
-                    if ( initialization ) msg = `To initialize the channel, send Alice the info in your console`;
-                    alert( msg );
-                },
-                alice_receive: async ( initialization ) => {
-                    var bobs_info = JSON.parse( prompt( `Enter the info from Bob` ) );
-                    var msg = `Click ok to receive ${bobs_info[ "amt_to_send" ]} sats from Bob`;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] + bobs_info[ "amt_to_send" ] < 1330 ) msg += `. Note that this will only bring your balance up to ${hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] + bobs_info[ "amt_to_send" ]} sats, which is less than 1330. If your balance is less than 1330 sats it is effectively zero due to force closure fees and the dust limit, so cancelling is recommended`;
-                    var conf;
-                    if ( bobs_info[ "amt_to_send" ] && typeof bobs_info[ "amt_to_send" ] == "number" && bobs_info[ "amt_to_send" ] > 0 && hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] - bobs_info[ "amt_to_send" ] - 500 - 500 >= 0 && !initialization ) conf = confirm( msg );
-                    else conf = true;
-                    if ( !conf ) return;
-                    var zero_out_alices_balance;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] + bobs_info[ "amt_to_send" ] < 330 ) zero_out_alices_balance = true;
-                    var zero_out_bobs_balance;
-                    if ( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] - bobs_info[ "amt_to_send" ] - 500 - 500 < 330 ) zero_out_bobs_balance = true;
-                    hedgehog.state[ "channel_0" ].alices_offchain_tx_info.push( bobs_info );
-                    hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "received" ] = true;
-                    var txid = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "txid" ];
-                    var vout = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "vout" ];
-                    var amnt = hedgehog.state[ "channel_0" ].multisig_utxo_info[ "amnt" ];
-                    if ( hedgehog.state[ "channel_0" ].bob_should_reveal ) var bobs_previous_revocation_hash = hedgehog.state[ "channel_0" ].bobs_revocation_hashes[ hedgehog.state[ "channel_0" ].bobs_revocation_hashes.length - 2 ];
-                    else var bobs_previous_revocation_hash;
-                    var alices_revocation_hash = hedgehog.state[ "channel_0" ].alices_revocation_hashes[ hedgehog.state[ "channel_0" ].alices_revocation_hashes.length - 1 ];
-                    var bobs_revocation_hash = hedgehog.state[ "channel_0" ].bobs_revocation_hashes[ hedgehog.state[ "channel_0" ].bobs_revocation_hashes.length - 1 ];
-                    var scripts = hedgehog.alices_revocation_script( alices_revocation_hash );
-                    var revocable = hedgehog.makeAddress( scripts );
-                    var tree = scripts.map( s => tapscript.Tap.encodeScript( s ) );
-                    hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "scripts" ] = scripts;
-                    hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "trees" ] = [tree];
-                    var txdata = tapscript.Tx.create({
-                        vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                        vout: [
-                            hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                            hedgehog.getVout( 330, revocable ),
-                        ],
-                    });
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 0 ][ 0 ] );
-                    var tree = hedgehog.state[ "channel_0" ].trees[ 0 ];
-                    var sig_1 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "sig_1" ];
-                    var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: target }).hex;
-                    var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_1, sighash, hedgehog.state[ "channel_0" ].bobs_pubkey );
-                    if ( !sig_is_valid ) {
-                        alert( `nevermind, sig_1 was invalid` );
-                        return hedgehog.state[ "channel_0" ].alices_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1, 1 );
-                    }
-                    var sig_2 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 0, { extension: target }).hex;
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
-                    txdata.vin[ 0 ].witness = [ sig_1, sig_2, hedgehog.state[ "channel_0" ].scripts[ 0 ][ 0 ], cblock ];
-                    var txhex = tapscript.Tx.encode( txdata ).hex;
-                    var offchain_txid = tapscript.Tx.util.getTxid( txdata );
-                    var bob_must_reveal_secret = false;
-                    if ( hedgehog.find_latest_time_i_sent( "alice" ) > -1 ) bob_must_reveal_secret = true;
-                    var amt_to_send = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "amt_to_send" ];
-                    {
-                        var to_alice = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ "channel_0" ].alices_pubkey ] );
-                        var alt_revocable_scripts = hedgehog.bobs_revocation_script( bobs_revocation_hash );
-                        var alt_revocable = hedgehog.makeAddress( alt_revocable_scripts );
-                        var alt_target = tapscript.Tap.encodeScript( alt_revocable_scripts[ 1 ] );
-                        var txdata = tapscript.Tx.create({
-                            vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                            vout: [
-                                hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                                hedgehog.getVout( 330, alt_revocable ),
-                            ],
-                        });
-                        var alt_txid = tapscript.Tx.util.getTxid( txdata );
-                        var txdata = tapscript.Tx.create({
-                            vin: [
-                                hedgehog.getVin( alt_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                                hedgehog.getVin( alt_txid, 1, 330, alt_revocable ),
-                            ],
-                            vout: [hedgehog.getVout( amnt - 330 - 500, to_alice )],
-                        });
-                        var penalty_target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 1 ][ 0 ] );
-                        var penalty_sig = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "penalty_sig" ];
-                        var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: penalty_target }).hex;
-                        var sig_is_valid = await nobleSecp256k1.schnorr.verify( penalty_sig, sighash, hedgehog.state[ "channel_0" ].bobs_pubkey );
-                        if ( !sig_is_valid ) {
-                            alert( `nevermind, the penalty_sig was invalid` );
-                            return hedgehog.state[ "channel_0" ].alices_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1, 1 );
-                        }
-                        var penalty_sig_2 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 0, { extension: penalty_target }).hex;
-                        var penalty_sig_3 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 1, { extension: alt_target }).hex;
-                        var latest_time_i_sent = hedgehog.find_latest_time_i_sent( "alice" );
-                        if ( bob_must_reveal_secret ) {
-                            var txdata = tapscript.Tx.create({
-                                vin: [
-                                    hedgehog.getVin( alt_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                                    hedgehog.getVin( alt_txid, 1, 330, alt_revocable ),
-                                ],
-                                vout: [
-                                    hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] + amt_to_send, hedgehog.state[ "channel_0" ].alices_address ),
-                                    hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] - amt_to_send - 500 - 500, hedgehog.state[ "channel_0" ].bobs_address ),
-                                ],
-                            });
-                            var force_close_sig_1 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "force_close_sig_1" ];
-                            var force_close_sig_2 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "force_close_sig_2" ];
-                            var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: penalty_target }).hex;
-                            var sig_is_valid = await nobleSecp256k1.schnorr.verify( force_close_sig_1, sighash, hedgehog.state[ "channel_0" ].bobs_pubkey );
-                            if ( !sig_is_valid ) {
-                                alert( `nevermind, force_close_sig_1 was invalid` );
-                                return hedgehog.state[ "channel_0" ].alices_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1, 1 );
-                            }
-                            var penalty_target_2 = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ hedgehog.state[ "channel_0" ].scripts.length - 1 ][ 2 ] );
-                            var sighash = tapscript.Signer.taproot.hash( txdata, 1, { extension: penalty_target_2 }).hex;
-                            var sig_is_valid = await nobleSecp256k1.schnorr.verify( force_close_sig_2, sighash, hedgehog.state[ "channel_0" ].bobs_pubkey );
-                            if ( !sig_is_valid ) {
-                                alert( `nevermind, force_close_sig_2 was invalid` );
-                                return hedgehog.state[ "channel_0" ].alices_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1, 1 );
-                            }
-                            var force_close_sig_3 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 0, { extension: penalty_target }).hex;
-                            var force_close_sig_4 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 1, { extension: penalty_target_2 }).hex;
-                        }
-                        if ( latest_time_i_sent > -1 ) {
-                            hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig" ] = penalty_sig;
-                            hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig_2" ] = penalty_sig_2;
-                            hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ latest_time_i_sent ][ "penalty_sig_3" ] = penalty_sig_3;
-                            if ( bob_must_reveal_secret ) hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_1" ] = force_close_sig_1;
-                            if ( bob_must_reveal_secret ) hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_2" ] = force_close_sig_2;
-                            if ( bob_must_reveal_secret ) hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_3" ] = force_close_sig_3;
-                            if ( bob_must_reveal_secret ) hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ latest_time_i_sent ][ "force_close_sig_4" ] = force_close_sig_4;
-                        }
-                    }
-                    if ( ( bob_must_reveal_secret && hedgehog.state[ "channel_0" ].bob_should_reveal && !bobs_info[ "secret" ] ) || ( bob_must_reveal_secret && bobs_info[ "secret" ] && hedgehog.rmd160( hedgehog.hexToBytes( bobs_info[ "secret" ] ) ) != bobs_previous_revocation_hash ) ) {
-                        alert( `nevermind, Bob didn't reveal his secret` );
-                        return hedgehog.state[ "channel_0" ].alices_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1, 1 );
-                    }
-                    if ( bob_must_reveal_secret ) {
-                        var past_scripts = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.find_latest_time_i_sent( "alice" ) ][ "scripts" ];
-                        var past_revocable = hedgehog.makeAddress( past_scripts );
-                        var past_tx = {
-                            vin: [hedgehog.getVin( txid, vout, amnt, hedgehog.state[ "channel_0" ].multisig )],
-                            vout: [
-                                hedgehog.getVout( amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                                hedgehog.getVout( 330, past_revocable ),
-                            ],
-                        }
-                        var past_txdata = tapscript.Tx.create( past_tx );
-                        var past_txid = tapscript.Tx.util.getTxid( past_txdata );
-                        var prev_txid = hedgehog.state[ "channel_0" ].txids_alice_watches_for[ "order" ][ hedgehog.state[ "channel_0" ].txids_alice_watches_for[ "order" ].length - 1 ];
-                        if ( "secret" in bobs_info && hedgehog.state[ "channel_0" ].bob_should_reveal ) hedgehog.state[ "channel_0" ].txids_alice_watches_for[ prev_txid ][ "secret" ] = bobs_info[ "secret" ];
-                        if ( !hedgehog.state[ "channel_0" ].bob_should_reveal && bob_must_reveal_secret ) hedgehog.state[ "channel_0" ].bob_should_reveal = true;
-                        hedgehog.state[ "channel_0" ].txids_alice_watches_for[ "order" ].push( past_txid );
-                        hedgehog.state[ "channel_0" ].txids_alice_watches_for[ past_txid ] = {
-                            secret: "",
-                            past_tx,
-                            index_of_tx_info_containing_recovery_scripts: hedgehog.find_latest_time_i_sent( "alice" ),
-                        }
-                        hedgehog.state[ "channel_0" ].bobs_revocation_hashes.push( bobs_info[ "bobs_revocation_hash" ] );
-                    }
-                    var prep_tx = {
-                        vin: [
-                            hedgehog.getVin( offchain_txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                            //TODO: change the 5 to a 2016
-                            hedgehog.getVin( offchain_txid, 1, 330, revocable, 5 ),
-                        ],
-                        vout: [
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] + amt_to_send, hedgehog.state[ "channel_0" ].alices_address ),
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] - amt_to_send - 500 - 500, hedgehog.state[ "channel_0" ].bobs_address ),
-                        ],
-                    }
-                    if ( zero_out_alices_balance ) prep_tx[ "vout" ].splice( 0, 1 );
-                    if ( zero_out_bobs_balance ) prep_tx[ "vout" ].splice( 1, 1 );
-                    var txdata = tapscript.Tx.create( prep_tx );
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 2 ][ 0 ] );
-                    var tree = hedgehog.state[ "channel_0" ].trees[ 2 ];
-                    var [ tpubkey, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
-                    var sig_3 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "sig_3" ];
-                    var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: target }).hex;
-                    var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_3, sighash, hedgehog.state[ "channel_0" ].bobs_pubkey );
-                    if ( !sig_is_valid ) {
-                        alert( `nevermind, sig_3 was invalid` );
-                        return hedgehog.state[ "channel_0" ].alices_offchain_tx_info.splice( hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1, 1 );
-                    }
-                    var sig_4 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 0, { extension: target }).hex;
-                    txdata.vin[ 0 ].witness = [ sig_3, sig_4, hedgehog.state[ "channel_0" ].scripts[ 0 ][ 0 ], cblock ];
-                    //TODO: fix this part -- the script will be #1 the first time
-                    //you send but after that I think it depends on who is sending
-                    var target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "scripts" ][ 0 ] );
-                    var tree = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "trees" ][ 0 ];
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
-                    var sig_5 = tapscript.Signer.taproot.sign( hedgehog.state[ "channel_0" ].alices_privkey, txdata, 1, { extension: target }).hex;
-                    //the script is supposed to come from the ones I made when I ran makeAddress to make the revocable address.
-                    //So I used to say here to get the script from hedgehog.state[ "channel_0" ].scripts[ hedgehog.state[ "channel_0" ].scripts.length - 1 ][ 0 ]. But now
-                    //I call makeAddress 1 or 2 times after that, depending on whether Bob reveals his secret or not.
-                    //So I define an offset of 2 and if Bob revealed his secret then I increment it by 1, then get the
-                    //script from there
-                    var offset = 2;
-                    if ( bob_must_reveal_secret ) offset = offset + 1;
-                    txdata.vin[ 1 ].witness = [ sig_5, hedgehog.state[ "channel_0" ].scripts[ hedgehog.state[ "channel_0" ].scripts.length - offset ][ 0 ], cblock ];
-                    hedgehog.state[ "channel_0" ].balances_according_to_alice = [ hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ] + amt_to_send, hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] - amt_to_send ];
-                    hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "tx1" ] = txhex;
-                    var txhex = tapscript.Tx.encode( txdata ).hex;
-                    hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.state[ "channel_0" ].alices_offchain_tx_info.length - 1 ][ "tx2" ] = txhex;
-                    if ( !initialization ) alert( `Enter the command 'hedgehog.alice_close()' in your browser console to close the channel with this state:\n\nAlice: ${hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ]} sats\nBob: ${hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ]} sats` );
-                },
-                alice_close: () => {
-                    console.log( `broadcast this:` );
-                    console.log( hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.find_latest_time_i_received( "alice" ) ][ "tx1" ] );
-                    //TODO: change the 5 to a 2016
-                    console.log( `broadcast this after 5 blocks:` );
-                    console.log( hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ hedgehog.find_latest_time_i_received( "alice" ) ][ "tx2" ] );
-                },
-                alice_penalize: txid => {
-                    var secret = hedgehog.state[ "channel_0" ].txids_alice_watches_for[ txid ][ "secret" ];
-                    var index = hedgehog.state[ "channel_0" ].txids_alice_watches_for[ txid ][ "index_of_tx_info_containing_recovery_scripts" ];
-                    var script = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "scripts" ][ 1 ];
-                    var tree = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "trees" ][ 0 ];
-                    var target = tapscript.Tap.encodeScript( script );
-                    var past_tx = hedgehog.state[ "channel_0" ].txids_alice_watches_for[ txid ][ "past_tx" ];
-                    var revocable = tapscript.Address.fromScriptPubKey( past_tx[ "vout" ][ 1 ][ "scriptPubKey" ] );
-                    var to_alice = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ "channel_0" ].alices_pubkey ] );
-                    var amnt = hedgehog.state[ "channel_0" ].txids_alice_watches_for[ txid ][ "past_tx" ][ "vin" ][ 0 ][ "prevout" ][ "value" ];
-                    var txdata = tapscript.Tx.create({
-                        vin: [
-                            hedgehog.getVin( txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                            hedgehog.getVin( txid, 1, 330, revocable ),
-                        ],
-                        vout: [hedgehog.getVout( amnt - 330 - 500, to_alice )],
-                    });
-                    var sig_1 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "penalty_sig" ];
-                    var sig_2 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "penalty_sig_2" ];
-                    var sig_3 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "penalty_sig_3" ];
-                    var penalty_target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 1 ][ 0 ] );
-                    // var sighash = tapscript.Signer.taproot.hash( txdata, 0, { extension: penalty_target }).hex;
-                    // var sig_is_valid = await nobleSecp256k1.schnorr.verify( sig_1, sighash, hedgehog.state[ "channel_0" ].bobs_pubkey );
-                    // console.log( sig_is_valid );
-                    var penalty_tree = hedgehog.state[ "channel_0" ].trees[ 1 ];
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: penalty_tree, target: penalty_target });
-                    var penalty_cblock = cblock;
-                    txdata.vin[ 0 ].witness = [ sig_1, sig_2, hedgehog.state[ "channel_0" ].scripts[ 1 ][ 0 ], penalty_cblock ];
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
-                    txdata.vin[ 1 ].witness = [ sig_3, secret, script, cblock ];
-                    var txhex = tapscript.Tx.encode( txdata ).hex;
-                    console.log( `broadcast this to penalize Bob:` );
-                    if ( hedgehog.state[ "channel_0" ].txids_alice_watches_for.order.indexOf( txid ) != hedgehog.state[ "channel_0" ].txids_alice_watches_for.order.length - 1 ) {
-                        return console.log( txhex );
-                    }
-                    var txdata = tapscript.Tx.create({
-                        vin: [
-                            hedgehog.getVin( txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_alice ),
-                            hedgehog.getVin( txid, 1, 330, revocable ),
-                        ],
-                        vout: [
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 0 ], hedgehog.state[ "channel_0" ].alices_address ),
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_alice[ 1 ] - 500 - 500, hedgehog.state[ "channel_0" ].bobs_address ),
-                        ],
-                    });
-                    //sig_1 is for input 0
-                    var sig_1 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "force_close_sig_1" ];
-                    //sig_2 is for input 1
-                    var sig_2 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "force_close_sig_2" ];
-                    //sig_3 is for input 0
-                    var sig_3 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "force_close_sig_3" ];
-                    //sig_4 is for input 1
-                    var sig_4 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "force_close_sig_4" ];
-                    var script_for_input_0 = hedgehog.state[ "channel_0" ].scripts[ 1 ][ 0 ];
-                    var target_for_input_0 = tapscript.Tap.encodeScript( script_for_input_0 );
-                    var tree_for_input_0 = hedgehog.state[ "channel_0" ].trees[ 1 ];
-                    var script_for_input_1 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "scripts" ][ 2 ];
-                    var target_for_input_1 = tapscript.Tap.encodeScript( script_for_input_1 );
-                    var tree_for_input_1 = hedgehog.state[ "channel_0" ].alices_offchain_tx_info[ index ][ "trees" ][ 0 ];
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tree_for_input_0, target: target_for_input_0 });
-                    var cblock_for_input_0 = cblock;
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tree_for_input_1, target: target_for_input_1 });
-                    var cblock_for_input_1 = cblock;
-                    txdata.vin[ 0 ].witness = [ sig_1, sig_3, script_for_input_0, cblock_for_input_0 ];
-                    txdata.vin[ 1 ].witness = [ sig_2, sig_4, script_for_input_1, cblock_for_input_1 ];
-                    var txhex = tapscript.Tx.encode( txdata ).hex;
-                    console.log( txhex );
-                },
-                bob_penalize: txid => {
-                    var secret = hedgehog.state[ "channel_0" ].txids_bob_watches_for[ txid ][ "secret" ];
-                    var index = hedgehog.state[ "channel_0" ].txids_bob_watches_for[ txid ][ "index_of_tx_info_containing_recovery_scripts" ];
-                    var script = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "scripts" ][ 1 ];
-                    var tree = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "trees" ][ 0 ];
-                    var target = tapscript.Tap.encodeScript( script );
-                    var past_tx = hedgehog.state[ "channel_0" ].txids_bob_watches_for[ txid ][ "past_tx" ];
-                    var revocable = tapscript.Address.fromScriptPubKey( past_tx[ "vout" ][ 1 ][ "scriptPubKey" ] );
-                    var to_bob = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ "channel_0" ].bobs_pubkey ] );
-                    var amnt = hedgehog.state[ "channel_0" ].txids_bob_watches_for[ txid ][ "past_tx" ][ "vin" ][ 0 ][ "prevout" ][ "value" ];
-                    var txdata = tapscript.Tx.create({
-                        vin: [
-                            hedgehog.getVin( txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                            hedgehog.getVin( txid, 1, 330, revocable ),
-                        ],
-                        vout: [hedgehog.getVout( amnt - 330 - 500, to_bob )],
-                    });
-                    var sig_1 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "penalty_sig" ];
-                    var sig_2 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "penalty_sig_2" ];
-                    var sig_3 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "penalty_sig_3" ];
-                    var penalty_target = tapscript.Tap.encodeScript( hedgehog.state[ "channel_0" ].scripts[ 2 ][ 0 ] );
-                    var penalty_tree = hedgehog.state[ "channel_0" ].trees[ 2 ];
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: penalty_tree, target: penalty_target });
-                    var penalty_cblock = cblock;
-                    txdata.vin[ 0 ].witness = [ sig_2, sig_1, hedgehog.state[ "channel_0" ].scripts[ 2 ][ 0 ], penalty_cblock ];
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree, target });
-                    txdata.vin[ 1 ].witness = [ sig_3, secret, script, cblock ];
-                    var txhex = tapscript.Tx.encode( txdata ).hex;
-                    console.log( `broadcast this to penalize Alice:` );
-                    if ( hedgehog.state[ "channel_0" ].txids_bob_watches_for.order.indexOf( txid ) != hedgehog.state[ "channel_0" ].txids_bob_watches_for.order.length - 1 ) {
-                        return console.log( txhex );
-                    }
-                    var txdata = tapscript.Tx.create({
-                        vin: [
-                            hedgehog.getVin( txid, 0, amnt - 330 - 500, hedgehog.state[ "channel_0" ].multisig_or_bob ),
-                            hedgehog.getVin( txid, 1, 330, revocable ),
-                        ],
-                        vout: [
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 0 ] - 500 - 500, hedgehog.state[ "channel_0" ].alices_address ),
-                            hedgehog.getVout( hedgehog.state[ "channel_0" ].balances_according_to_bob[ 1 ], hedgehog.state[ "channel_0" ].bobs_address ),
-                        ],
-                    });
-                    //sig_1 is for input 0
-                    var sig_1 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "force_close_sig_1" ];
-                    //sig_2 is for input 1
-                    var sig_2 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "force_close_sig_2" ];
-                    //sig_3 is for input 0
-                    var sig_3 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "force_close_sig_3" ];
-                    //sig_4 is for input 1
-                    var sig_4 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "force_close_sig_4" ];
-                    var script_for_input_0 = hedgehog.state[ "channel_0" ].scripts[ 2 ][ 0 ];
-                    var target_for_input_0 = tapscript.Tap.encodeScript( script_for_input_0 );
-                    var tree_for_input_0 = hedgehog.state[ "channel_0" ].trees[ 2 ];
-                    var script_for_input_1 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "scripts" ][ 2 ];
-                    var target_for_input_1 = tapscript.Tap.encodeScript( script_for_input_1 );
-                    var tree_for_input_1 = hedgehog.state[ "channel_0" ].bobs_offchain_tx_info[ index ][ "trees" ][ 0 ];
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tree_for_input_0, target: target_for_input_0 });
-                    var cblock_for_input_0 = cblock;
-                    var [ _, cblock ] = tapscript.Tap.getPubKey( "ab".repeat( 32 ), { tree: tree_for_input_1, target: target_for_input_1 });
-                    var cblock_for_input_1 = cblock;
-                    txdata.vin[ 0 ].witness = [ sig_3, sig_1, script_for_input_0, cblock_for_input_0 ];
-                    txdata.vin[ 1 ].witness = [ sig_4, sig_2, script_for_input_1, cblock_for_input_1 ];
-                    var txhex = tapscript.Tx.encode( txdata ).hex;
-                    console.log( txhex );
-                },
-                // makeTx: ( txid, vout, amnt, addy, to_addy ) => {
-                //     var tx = {
-                //         vin: [hedgehog.getVin( txid, vout, amnt, addy )],
-                //         //todo: estimate the actual fee cost and include anchors
-                //         vout: [hedgehog.getVout( amnt - 500, to_addy )],
-                //     }
-                //     var txdata = tapscript.Tx.create( tx );
-                //     return tapscript.Tx.encode( txdata ).hex;
-                // },
-                // find_latest_revocation_hash: user => {
-                //     if ( user == "bob" ) var temp = [...hedgehog.state[ "channel_0" ].bobs_offchain_tx_info].reverse();
-                //     else var temp = [...hedgehog.state[ "channel_0" ].alices_offchain_tx_info].reverse();
-                //     var hash;
-                //     temp.every( item => {
-                //         if ( user == "bob" && "alices_revocation_hash" in item ) {return hash = item[ "alices_revocation_hash" ];}
-                //         if ( user == "alice" && "bobs_revocation_hash" in item ) {return hash = item[ "bobs_revocation_hash" ];}
-                //         return true;
-                //     });
-                //     return hash;
-                // },
-                // find_index_of_offchain_tx_info_with_this_txid: ( user, txid ) => {
-                //     if ( user == "bob" ) var temp = [...hedgehog.state[ "channel_0" ].bobs_offchain_tx_info].reverse();
-                //     else var temp = [...hedgehog.state[ "channel_0" ].alices_offchain_tx_info].reverse();
-                //     var index_i_seek = -1;
-                //     temp.every( ( item, index ) => {
-                //         if ( "penalty_txid" in item && item[ "penalty_txid" ] == txid ) {
-                //             return index_i_seek = index;
-                //         }
-                //         return true;
-                //     });
-                //     if ( index_i_seek < 0 ) return -1;
-                //     return temp.length - 1 - index_i_seek;
-                // },
+                    console.log( "Wait 5 blocks and broadcast this transaction to finalize the force closure:" );
+                    console.log( hedgehog.state[ chan_id ].latest_force_close_txs[ 1 ] );
+                }
             }
         </script>
+        <style>
+            * {
+                box-sizing: border-box;
+                font-size: 1.15rem;
+                font-family: Arial, sans-serif;
+            }
+            html {
+                max-width: 800px;
+                padding: 3rem 1rem;
+                margin: auto;
+                line-height: 1.25;
+                padding: 0;
+            }
+            body {
+                margin: 3rem 1rem;
+            }
+            h1 {
+                font-size: 2rem;
+            }
+            h2 {
+                font-size: 1.5rem;
+            }
+            input {
+                line-height: 1.25;
+                width: 100%;
+                height: 1.8rem;
+                font-size: 1.15rem;
+                border: 1px solid grey;
+            }
+            @media screen and (max-width: 600px) {
+            }
+        </style>
         <script>
             var $ = document.querySelector.bind( document );
             var $$ = document.querySelectorAll.bind( document );
@@ -923,69 +740,19 @@
         </script>
     </head>
     <body>
+        <script>var push_all_funds_to_counterparty = true; if ( $_GET[ "alice" ] == "true" ) push_all_funds_to_counterparty = false;</script>
+        <h1>Welcome to hedgehog</h1>
+        <p><button class="send_btn">Send</button><button class="receive_btn">Receive</button><br><button onclick="hedgehog.openChannel( push_all_funds_to_counterparty )" class="open_channel">Open channel</button><br><button class="close_channel">Close channel</button></p>
         <script>
-            var init = async()=>{
-                if ( !$_GET[ "bob" ] ) {
-                    hedgehog.state[ "channel_0" ].alices_privkey = "ab".repeat( 32 );
-                    hedgehog.state[ "channel_0" ].alices_pubkey = nobleSecp256k1.getPublicKey( hedgehog.state[ "channel_0" ].alices_privkey, true ).substring( 2 );
-                    var alices_initial_secret = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
-                    var alices_initial_revocation_hash = hedgehog.rmd160( hedgehog.hexToBytes( alices_initial_secret ) );
-                    hedgehog.state[ "channel_0" ].alices_revocation_preimages.push( alices_initial_secret );
-                    hedgehog.state[ "channel_0" ].alices_revocation_hashes.push( alices_initial_revocation_hash );
-                    console.log( `Alice's pubkey and revocation hash:` );
-                    console.log( JSON.stringify( [ hedgehog.state[ "channel_0" ].alices_pubkey, alices_initial_revocation_hash ] ) );
-                    var bobs_pubkey_and_hash = JSON.parse( prompt( `Enter Bob's pubkey and revocation hash` ) );
-                    hedgehog.state[ "channel_0" ].bobs_pubkey = bobs_pubkey_and_hash[ 0 ];
-                    var bobs_initial_revocation_hash = bobs_pubkey_and_hash[ 1 ];
-                    hedgehog.state[ "channel_0" ].bobs_revocation_hashes.push( bobs_initial_revocation_hash );
-                } else {
-                    hedgehog.state[ "channel_0" ].bobs_privkey = "ba".repeat( 32 );
-                    hedgehog.state[ "channel_0" ].bobs_pubkey = nobleSecp256k1.getPublicKey( hedgehog.state[ "channel_0" ].bobs_privkey, true ).substring( 2 );
-                    var bobs_initial_secret = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
-                    var bobs_initial_revocation_hash = hedgehog.rmd160( hedgehog.hexToBytes( bobs_initial_secret ) );
-                    hedgehog.state[ "channel_0" ].bobs_revocation_preimages.push( bobs_initial_secret );
-                    hedgehog.state[ "channel_0" ].bobs_revocation_hashes.push( bobs_initial_revocation_hash );
-                    console.log( `Bob's pubkey and revocation hash:` );
-                    console.log( JSON.stringify( [ hedgehog.state[ "channel_0" ].bobs_pubkey, bobs_initial_revocation_hash ] ) );
-                    var alices_pubkey_and_hash = JSON.parse( prompt( `Enter Alice's pubkey and revocation hash` ) );
-                    hedgehog.state[ "channel_0" ].alices_pubkey = alices_pubkey_and_hash[ 0 ];
-                    var alices_initial_revocation_hash = alices_pubkey_and_hash[ 1 ];
-                    hedgehog.state[ "channel_0" ].alices_revocation_hashes.push( alices_initial_revocation_hash );
-                }
-                hedgehog.state[ "channel_0" ].alices_address = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ "channel_0" ].alices_pubkey ], hedgehog.network );
-                hedgehog.state[ "channel_0" ].bobs_address = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ "channel_0" ].bobs_pubkey ], hedgehog.network );
-                var multisig_scripts = [ [ hedgehog.state[ "channel_0" ].alices_pubkey, "OP_CHECKSIG", hedgehog.state[ "channel_0" ].bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ] ];
-                hedgehog.state[ "channel_0" ].multisig = hedgehog.makeAddress( multisig_scripts );
-                var multisig_or_alice_scripts = [
-                    [ hedgehog.state[ "channel_0" ].alices_pubkey, "OP_CHECKSIG", hedgehog.state[ "channel_0" ].bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ],
-                    //TODO: change the 10 to 4032
-                    [ 10, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", hedgehog.state[ "channel_0" ].alices_pubkey, "OP_CHECKSIG" ],
-                ];
-                hedgehog.state[ "channel_0" ].multisig_or_alice = hedgehog.makeAddress( multisig_or_alice_scripts );
-                var multisig_or_bob_scripts = [
-                    [ hedgehog.state[ "channel_0" ].alices_pubkey, "OP_CHECKSIG", hedgehog.state[ "channel_0" ].bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ],
-                    //TODO: change the 10 to 4032
-                    [ 10, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", hedgehog.state[ "channel_0" ].bobs_pubkey, "OP_CHECKSIG" ],
-                ];
-                hedgehog.state[ "channel_0" ].multisig_or_bob = hedgehog.makeAddress( multisig_or_bob_scripts );
-                var txid = prompt( `send some sats to this address and give the txid:\n\n${hedgehog.state[ "channel_0" ].multisig}` );
-                var vout = Number( prompt( `and the vout` ) );
-                var amnt = Number( prompt( `and the amount` ) );
-                hedgehog.state[ "channel_0" ].multisig_utxo_info = {
-                    txid,
-                    vout,
-                    amnt,
-                }
-                hedgehog.state[ "channel_0" ].balances_according_to_alice = [ 0, amnt ];
-                hedgehog.state[ "channel_0" ].balances_according_to_bob = [ 0, amnt ];
-                var initialization = true;
-                if ( $_GET[ "bob" ] ) hedgehog.bob_send( amnt - 1_000, initialization );
-                else await hedgehog.alice_receive( initialization );
-                hedgehog.state[ "channel_0" ].balances_according_to_alice = [ amnt, 0 ];
-                hedgehog.state[ "channel_0" ].balances_according_to_bob = [ amnt, 0 ];
-                alert( `Yay, your channel is funded! Enter the command 'hedgehog.alice_send()' or 'hedgehog.bob_send()' in your browser console to have one party send the other an off-chain payment` );
+            if ( $_GET[ "alice" ] == "true" ) {
+                var privkey = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() );
+                var pubkey = nobleSecp256k1.getPublicKey( privkey, true ).substring( 2 );
+                var preimage = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
+                var hash = hedgehog.rmd160( hedgehog.hexToBytes( preimage ) );
+                hedgehog.keypairs[ pubkey ] = {privkey, preimage};
+                console.log( "Your pubkey/hash pair:" );
+                console.log( JSON.stringify( [ pubkey, hash ] ) );
             }
-            window.onload = () => {setTimeout(()=>{init();})}
         </script>
     </body>
 </html>
