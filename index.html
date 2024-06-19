@@ -740,11 +740,11 @@
         </script>
     </head>
     <body>
-        <script>var push_all_funds_to_counterparty = true; if ( $_GET[ "alice" ] == "true" ) push_all_funds_to_counterparty = false;</script>
+        <script>var push_all_funds_to_counterparty = true; if ( $_GET[ "bob" ] != "true" ) push_all_funds_to_counterparty = false;</script>
         <h1>Welcome to hedgehog</h1>
         <p><button class="send_btn">Send</button><button class="receive_btn">Receive</button><br><button onclick="hedgehog.openChannel( push_all_funds_to_counterparty )" class="open_channel">Open channel</button><br><button class="close_channel">Close channel</button></p>
         <script>
-            if ( $_GET[ "alice" ] == "true" ) {
+            if ( $_GET[ "bob" ] != "true" ) {
                 var privkey = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() );
                 var pubkey = nobleSecp256k1.getPublicKey( privkey, true ).substring( 2 );
                 var preimage = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
