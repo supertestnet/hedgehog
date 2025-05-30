@@ -11,8 +11,47 @@ Hedgehog is a protocol for two party payment channels. Hedgehog channels are sim
 
 The properties mentioned above allow for an improved payment experience. Using hedgehog feels similar to using an ecash protocol like cashu or fedimint, except with no server. If you have a channel with someone, you can -- without their assistance -- create a payment for them, embed it in a piece of text (think of it like a cheque), and send it to them via email or some other communication method. Then you can go offline. When they get online, they can either accept the state change (the cheque) and update their balance without your further assistance, or they can reject it. If they accept the state change (the cheque) they can even use their new balance to pay you back later by making another state change (another cheque) that builds on the previous state change (i.e. spends the cheque to make a new cheque). And they can send the new state change (the new cheque) to you even if you are still offline. Or, if they reject your state change, they can propose an alternative one and wait for you to accept that.
 
-# Video demo
+# Quickstart Guide
+
+## Setup
+1. Open `index.html` in two browser windows:
+   - Alice: `index.html`
+   - Bob: `index.html?bob=true`
+
+2. Alice: ⎘ Copy your pubkey/hash from browser console
+3. Bob: Click "Open channel" → ⎘ Paste Alice's pubkey/hash → Fund the address → Enter tx details
+4. Bob: ⎘ Copy channel data from console
+5. Alice: Click "Open channel" → Select "OK" → ⎘ Paste Bob's data
+
+## Send Payments
+```bash
+# Sender: Click "Send" → Enter amount → ⎘ Copy payment data from console
+# Receiver: Click "Receive" → ⎘ Paste payment data
+```
+
+## Example Flow
+```javascript
+// Alice sends 1000 sats to Bob
+1. Alice clicks Send → enters 1000 → copies: {"sig_1":"...", "sig_3":"...", "hash":"...", "amnt":1000, "chan_id":"..."}
+2. Alice emails/messages this to Bob
+3. Bob clicks Receive → pastes data → balance updates
+
+// Bob can now send back without Alice online
+4. Bob clicks Send → enters 500 → gets new payment data
+5. Later, Alice receives and accepts Bob's payment
+```
+
+## Force Close
+```bash
+# Click "Close channel" to get two transactions:
+1. Broadcast first tx immediately
+2. Wait 5 blocks (2016 on mainnet)  
+3. Broadcast second tx
+```
+
+## Video demo
 [![](https://i.ibb.co/DVFyjSs/hedgehog-thumbnail-with-yt-logo.png)](https://www.youtube.com/watch?v=-JeBDVPH1gA)
+
 
 # How hedgehog works
 
