@@ -123,7 +123,7 @@
                             var privkey = hedgehog.keypairs[ pubkey ][ "privkey" ];
                             var preimage = hedgehog.keypairs[ pubkey ][ "preimage" ];
                             var chan_id = data[ "chan_id" ];
-                            hedgehog.state[ chan_id ] = hedgehog.state_obj;
+                            hedgehog.state[ chan_id ] = JSON.parse( JSON.stringify( hedgehog.state_obj ) );
                             hedgehog.state[ chan_id ][ "alices_privkey" ] = privkey;
                             hedgehog.state[ chan_id ][ "alices_pubkey" ] = pubkey;
                             hedgehog.state[ chan_id ][ "bobs_pubkey" ] = data[ "sender_pubkey" ];
@@ -164,7 +164,7 @@
                     //handle the case where Bob opens a channel to Alice unilaterally
                     //start by preparing the state object
                     var chan_id = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
-                    hedgehog.state[ chan_id ] = hedgehog.state_obj;
+                    hedgehog.state[ chan_id ] = JSON.parse( JSON.stringify( hedgehog.state_obj ) );
                     hedgehog.state[ chan_id ].bobs_privkey = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() );
                     hedgehog.state[ chan_id ].bobs_pubkey = nobleSecp256k1.getPublicKey( hedgehog.state[ chan_id ].bobs_privkey, true ).substring( 2 );
                     var alices_pubkey_and_hash = JSON.parse( prompt( `Enter Alice's pubkey and revocation hash` ) );
