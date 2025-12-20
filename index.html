@@ -100,11 +100,11 @@
                 openChannel: async push_all_funds_to_counterparty => {
                     //there are three ways to open a channel:
                     //the first way is as Bob, opening a channel to Alice unilaterally
-                    //the code for that after this "if" statement because a
-                    //unilateral channel open requires pushing all funds to your counterparty
                     //the second way is as Alice, accepting a channel Bob already unilaterally opened
                     //the third way is as Alice, opening a new channel cooperatively with Bob
-                    //the second and third ways are handled in the first "if" statement below
+                    //the second and third ways are handled in the first "if" statement below, and
+                    //the first way is handled in the code after the following "if" statement, because
+                    //a unilateral channel open requires pushing all funds to your counterparty
                     //in theory there are two more ways: Bob could open a channel to Alice cooperatively
                     //and thus keep some or all of the funds on his side, or Alice could open a channel
                     //to Bob unilaterally and thus push all funds to Bob's side. To do these examples,
