@@ -123,7 +123,7 @@
                     //she needs to get the multisig address first, and that means she must run this
                     //function with the parameter "just_return_multisig_address_and_privkey" set to true.
                     //The next time she runs it, she will set it to false, but will supply the same
-                    //privkey she supplied previously, so that she gets the same channel addy as before.
+                    //privkey it returned previously, so that she gets the same channel addy as before.
                     if ( !push_all_funds_to_counterparty ) {
                         var has_data = confirm( `Click ok if someone sent you channel opening info or cancel if you are opening this channel yourself` );
                         if ( has_data ) {
