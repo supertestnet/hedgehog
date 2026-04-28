@@ -203,7 +203,7 @@
                     console.log( "address:", hedgehog.state[ chan_id ].multisig );
 
                     if ( !txid ) var txid = prompt( `send some sats to this address and give the txid:\n\n${hedgehog.state[ chan_id ].multisig}` );
-                    if ( !vout ) var vout = Number( prompt( `and the vout` ) );
+                    if ( !vout && vout !== 0 ) var vout = Number( prompt( `and the vout` ) );
                     if ( !amnt ) var amnt = Number( prompt( `and the amount` ) );
                     hedgehog.state[ chan_id ].multisig_utxo_info = {
                         txid,
