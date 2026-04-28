@@ -97,7 +97,7 @@
                     //TODO: change the 10 to 4032
                     [ 10, "OP_CHECKSEQUENCEVERIFY", "OP_DROP", hedgehog.state[ chan_id ].alices_pubkey, "OP_CHECKSIG" ],
                 ]),
-                openChannel: async push_all_funds_to_counterparty => {
+                openChannel: async ( push_all_funds_to_counterparty, alices_pubkey_and_hash, just_return_multisig_address_and_privkey, bobs_privkey, txid, vout, amnt ) => {
                     //there are three ways to open a channel:
                     //the first way is as Bob, opening a channel to Alice unilaterally
                     //the second way is as Alice, accepting a channel Bob already unilaterally opened
@@ -112,10 +112,18 @@
                     //or have Bob open a channel with push_all_funds_to_counterparty set to false
                     //note that I haven't written code for the latter case, but what I normally do
                     //instead is, I have Bob tell Alice what utxo(s) he wants to put in their channel,
-                    //and then I have Alice run the code to open a channel to Bob. Thus she "pushes" to
-                    //him all of his own money, without ever having custody of it, and that is a form of
-                    //having Bob open a channel cooperatively with Alice, such that he keeps his money on
-                    //his side of the channel
+                    //and then I have Alice pretend to "be" Bob such that she (as Bob) runs the code to
+                    //open a channel to Bob. Thus she "pushes" to him all of his own money, without ever
+                    //having custody of it, and that is a form of having Bob open a channel cooperatively
+                    //with Alice, such that he keeps his money on his side of the channel. That is why
+                    //there is an option to pass in a privkey for Bob instead of generating one. Alice
+                    //can only push all the money to Bob if she first makes a tx putting all of Bob's
+                    //utxos into the channel address; she is expected to make that tx outside of this
+                    //function and then give the tx's txid, vout, and amnt as parameters, and to do that,
+                    //she needs to get the multisig address first, and that means she must run this
+                    //function with the parameter "just_return_multisig_address_and_privkey" set to true.
+                    //The next time she runs it, she will set it to false, but will supply the same
+                    //privkey she supplied previously, so that she gets the same channel addy as before.
                     if ( !push_all_funds_to_counterparty ) {
                         var has_data = confirm( `Click ok if someone sent you channel opening info or cancel if you are opening this channel yourself` );
                         if ( has_data ) {
@@ -167,13 +175,22 @@
                         return;
                     }
 
+                    if ( just_return_multisig_address_and_privkey ) {
+                        var [ alices_pubkey ] = alices_pubkey_and_hash;
+                        var bobs_privkey = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() );
+                        var bobs_pubkey = nobleSecp256k1.getPublicKey( bobs_privkey, true ).substring( 2 );
+                        var multisig_script = [ alices_pubkey, "OP_CHECKSIG", bobs_pubkey, "OP_CHECKSIGADD", 2, "OP_EQUAL" ];
+                        return [ hedgehog.makeAddress( null, [ multisig_script ] ), bobs_privkey ];
+                    }
+
                     //handle the case where Bob opens a channel to Alice unilaterally
                     //start by preparing the state object
                     var chan_id = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() ).substring( 0, 32 );
                     hedgehog.state[ chan_id ] = JSON.parse( JSON.stringify( hedgehog.state_obj ) );
-                    hedgehog.state[ chan_id ].bobs_privkey = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() );
+                    if ( !bobs_privkey ) var bobs_privkey = hedgehog.bytesToHex( nobleSecp256k1.utils.randomPrivateKey() )
+                    hedgehog.state[ chan_id ].bobs_privkey = bobs_privkey;
                     hedgehog.state[ chan_id ].bobs_pubkey = nobleSecp256k1.getPublicKey( hedgehog.state[ chan_id ].bobs_privkey, true ).substring( 2 );
-                    var alices_pubkey_and_hash = JSON.parse( prompt( `Enter Alice's pubkey and revocation hash` ) );
+                    if ( !alices_pubkey_and_hash ) alices_pubkey_and_hash = JSON.parse( prompt( `Enter Alice's pubkey and revocation hash` ) );
                     hedgehog.state[ chan_id ].alices_pubkey = alices_pubkey_and_hash[ 0 ];
                     hedgehog.state[ chan_id ].alices_revocation_hashes.push( alices_pubkey_and_hash[ 1 ] );
                     hedgehog.state[ chan_id ].alices_address = tapscript.Address.fromScriptPubKey( [ "OP_1", hedgehog.state[ chan_id ].alices_pubkey ], hedgehog.network );
@@ -185,9 +202,9 @@
                     hedgehog.state[ chan_id ].multisig = hedgehog.makeAddress( chan_id, [ multisig_script ] );
                     console.log( "address:", hedgehog.state[ chan_id ].multisig );
 
-                    var txid = prompt( `send some sats to this address and give the txid:\n\n${hedgehog.state[ chan_id ].multisig}` );
-                    var vout = Number( prompt( `and the vout` ) );
-                    var amnt = Number( prompt( `and the amount` ) );
+                    if ( !txid ) var txid = prompt( `send some sats to this address and give the txid:\n\n${hedgehog.state[ chan_id ].multisig}` );
+                    if ( !vout ) var vout = Number( prompt( `and the vout` ) );
+                    if ( !amnt ) var amnt = Number( prompt( `and the amount` ) );
                     hedgehog.state[ chan_id ].multisig_utxo_info = {
                         txid,
                         vout,
