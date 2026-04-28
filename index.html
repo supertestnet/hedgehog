@@ -110,6 +110,12 @@
                     //to Bob unilaterally and thus push all funds to Bob's side. To do these examples,
                     //just have Alice open a channel with push_all_funds_to_counterparty set to true
                     //or have Bob open a channel with push_all_funds_to_counterparty set to false
+                    //note that I haven't written code for the latter case, but what I normally do
+                    //instead is, I have Bob tell Alice what utxo(s) he wants to open their channel with,
+                    //and then I have Alice run the code to open the channel to Bob. Thus she "pushes" to
+                    //him all of his own money, without ever having custody of it, and that is a form of
+                    //having Bob open a channel cooperatively with Alice, such that he keeps his money on
+                    //his side of the channel
                     if ( !push_all_funds_to_counterparty ) {
                         var has_data = confirm( `Click ok if someone sent you channel opening info or cancel if you are opening this channel yourself` );
                         if ( has_data ) {
